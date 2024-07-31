@@ -1,15 +1,15 @@
 const acorn = require('acorn');
 
 // Fonction pour évaluer les expressions
-function evaluateExpression(node, context) {
+async function evaluateExpression(node, context) {
     switch (node.type) {
         case 'Literal':
             return node.value;
         case 'Identifier':
             return context[node.name];
         case 'BinaryExpression':
-            const left = evaluateExpression(node.left, context);
-            const right = evaluateExpression(node.right, context);
+            const left = await evaluateExpression(node.left, context);
+            const right = await evaluateExpression(node.right, context);
             switch (node.operator) {
                 case '+':
                     return left + right;
@@ -38,10 +38,10 @@ function evaluateExpression(node, context) {
             }
             break;
         case 'CallExpression':
-            const callee = evaluateExpression(node.callee, context);
-            const args = node.arguments.map(arg => evaluateExpression(arg, context));
+            const callee = await evaluateExpression(node.callee, context);
+            const args = await Promise.all(node.arguments.map(arg => evaluateExpression(arg, context)));
             if (node.callee.type === 'MemberExpression') {
-                const obj = evaluateExpression(node.callee.object, context);
+                const obj = await evaluateExpression(node.callee.object, context);
                 const method = node.callee.property.name;
                 if (typeof obj[method] === 'function') {
                     return obj[method](...args);
@@ -56,43 +56,42 @@ function evaluateExpression(node, context) {
                 }
             }
         case 'MemberExpression':
-            const object = evaluateExpression(node.object, context);
-            const property = node.computed ? evaluateExpression(node.property, context) : node.property.name;
+            const object = await evaluateExpression(node.object, context);
+            const property = node.computed ? await evaluateExpression(node.property, context) : node.property.name;
             return object[property];
         case 'ArrayExpression':
-            return node.elements.map(element => evaluateExpression(element, context));
+            return Promise.all(node.elements.map(element => evaluateExpression(element, context)));
         case 'ObjectExpression':
             const obj = {};
-            node.properties.forEach(prop => {
-                const key = prop.key.type === 'Identifier' ? prop.key.name : evaluateExpression(prop.key, context);
-                const value = evaluateExpression(prop.value, context);
+            for (const prop of node.properties) {
+                const key = prop.key.type === 'Identifier' ? prop.key.name : await evaluateExpression(prop.key, context);
+                const value = await evaluateExpression(prop.value, context);
                 obj[key] = value;
-            });
+            }
             return obj;
         case 'ArrowFunctionExpression':
-            return (...args) => {
+            return async (...args) => {
                 const localContext = { ...context };
                 node.params.forEach((param, index) => {
                     localContext[param.name] = args[index];
                 });
-                return node.body.type === 'BlockStatement' ? interpretBlockStatement(node.body, localContext) : evaluateExpression(node.body, localContext);
+                return node.body.type === 'BlockStatement' ? await interpretBlockStatement(node.body, localContext) : await evaluateExpression(node.body, localContext);
             };
         case 'AssignmentExpression':
             if (node.left.type === 'MemberExpression') {
-                const obj = evaluateExpression(node.left.object, context);
-                const prop = node.left.computed ? evaluateExpression(node.left.property, context) : node.left.property.name;
-                const value = evaluateExpression(node.right, context);
+                const obj = await evaluateExpression(node.left.object, context);
+                const prop = node.left.computed ? await evaluateExpression(node.left.property, context) : node.left.property.name;
+                const value = await evaluateExpression(node.right, context);
                 obj[prop] = value;
                 return value;
             } else if (node.left.type === 'Identifier') {
-                const value = evaluateExpression(node.right, context);
+                const value = await evaluateExpression(node.right, context);
                 context[node.left.name] = value;
                 return value;
             }
             break;
         case 'UpdateExpression':
             if (node.argument.type === 'Identifier') {
-                const argument = context[node.argument.name];
                 if (node.operator === '++') {
                     return node.prefix ? ++context[node.argument.name] : context[node.argument.name]++;
                 } else if (node.operator === '--') {
@@ -101,48 +100,51 @@ function evaluateExpression(node, context) {
             }
             break;
         case 'ConditionalExpression':
-            const test = evaluateExpression(node.test, context);
-            return test ? evaluateExpression(node.consequent, context) : evaluateExpression(node.alternate, context);
+            const test = await evaluateExpression(node.test, context);
+            return test ? await evaluateExpression(node.consequent, context) : await evaluateExpression(node.alternate, context);
         case 'BlockStatement':
             return interpretBlockStatement(node, context);
+        case 'AwaitExpression':
+            const argument = await evaluateExpression(node.argument, context);
+            return await argument;
         default:
             throw new Error(`Unsupported expression type: ${node.type}`);
     }
 }
 
 // Fonction pour interpréter une déclaration de fonction
-function interpretFunctionDeclaration(node, context) {
-    const func = function (...args) {
+async function interpretFunctionDeclaration(node, context) {
+    const func = async function (...args) {
         const localContext = { ...context };
         node.params.forEach((param, index) => {
             localContext[param.name] = args[index];
         });
-        return interpretBlockStatement(node.body, localContext);
+        return await interpretBlockStatement(node.body, localContext);
     };
 
     if (node.async) {
         context[node.id.name] = async function (...args) {
-            return func(...args);
-        }
+            return await func(...args);
+        };
     } else {
         context[node.id.name] = func;
     }
 }
 
 // Fonction pour interpréter une déclaration de variable
-function interpretVariableDeclaration(node, context) {
-    node.declarations.forEach(declaration => {
+async function interpretVariableDeclaration(node, context) {
+    for (const declaration of node.declarations) {
         const name = declaration.id.name;
-        const value = evaluateExpression(declaration.init, context);
+        const value = await evaluateExpression(declaration.init, context);
         context[name] = value;
-    });
+    }
 }
 
 // Fonction pour interpréter un bloc de code
-function interpretBlockStatement(node, context) {
+async function interpretBlockStatement(node, context) {
     let result;
     for (const statement of node.body) {
-        result = interpretStatement(statement, context);
+        result = await interpretStatement(statement, context);
         if (statement.type === 'ReturnStatement') {
             return result;
         }
@@ -151,57 +153,57 @@ function interpretBlockStatement(node, context) {
 }
 
 // Fonction pour interpréter une instruction
-function interpretStatement(node, context) {
+async function interpretStatement(node, context) {
     switch (node.type) {
         case 'FunctionDeclaration':
-            interpretFunctionDeclaration(node, context);
+            await interpretFunctionDeclaration(node, context);
             break;
         case 'VariableDeclaration':
-            interpretVariableDeclaration(node, context);
+            await interpretVariableDeclaration(node, context);
             break;
         case 'ExpressionStatement':
-            evaluateExpression(node.expression, context);
+            await evaluateExpression(node.expression, context);
             break;
         case 'ReturnStatement':
-            return evaluateExpression(node.argument, context);
+            return await evaluateExpression(node.argument, context);
         case 'ForStatement':
-            interpretForStatement(node, context);
+            await interpretForStatement(node, context);
             break;
         case 'BlockStatement':
-            return interpretBlockStatement(node, context);
+            return await interpretBlockStatement(node, context);
         case 'IfStatement':
-            const test = evaluateExpression(node.test, context);
+            const test = await evaluateExpression(node.test, context);
             if (test) {
-                return interpretStatement(node.consequent, context);
+                return await interpretStatement(node.consequent, context);
             } else if (node.alternate) {
-                return interpretStatement(node.alternate, context);
+                return await interpretStatement(node.alternate, context);
             }
             break;
         case 'AwaitExpression':
-                //const argument = await evaluateExpression(node.argument, context);
-                //return await argument;
+            const argument = await evaluateExpression(node.argument, context);
+            return await argument;
         default:
             throw new Error(`Unsupported statement type: ${node.type}`);
     }
 }
 
 // Fonction pour interpréter une boucle for
-function interpretForStatement(node, context) {
+async function interpretForStatement(node, context) {
     if (node.init) {
-        interpretStatement(node.init, context);
+        await interpretStatement(node.init, context);
     }
-    while (evaluateExpression(node.test, context)) {
-        interpretBlockStatement(node.body, context);
+    while (await evaluateExpression(node.test, context)) {
+        await interpretBlockStatement(node.body, context);
         if (node.update) {
-            evaluateExpression(node.update, context);
+            await evaluateExpression(node.update, context);
         }
     }
 }
 
 // Fonction principale pour interpréter un programme
-function interpretProgram(code, context = {}) {
+async function interpretProgram(code, context = {}) {
     const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module" });
-    return interpretBlockStatement(ast, context);
+    return await interpretBlockStatement(ast, context);
 }
 
 module.exports = { interpretProgram, interpretBlockStatement };
