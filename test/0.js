@@ -32,6 +32,14 @@ async function testAsync() {
     return 1;
 }
 console.log("testAsync");
-console.log(testAsync());
+console.log(testAsync() , "Promise ?");
 console.log(await testAsync());
 //console.log("testAsync",await testAsync());
+
+
+{
+    let a = 5;
+    
+}
+
+console.log(a);
