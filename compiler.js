@@ -1,65 +1,106 @@
 const acorn = require('acorn');
 
-// Enumération pour les opcodes
+// Enumeration for opcodes
 const OpCode = {
   KNUM: 'KNUM',
   ADDVN: 'ADDVN',
   ADDNV: 'ADDNV',
   ADDVV: 'ADDVV',
   ADDNN: 'ADDNN',
+  SUBVV: 'SUBVV',
+  MULVV: 'MULVV',
+  DIVVV: 'DIVVV',
   MOV: 'MOV',
   KSTR: 'KSTR',
   KPRI: 'KPRI',
   KNULL: 'KNULL',
-  PRINT: 'PRINT',
   ISLT: 'ISLT',
   ISGE: 'ISGE',
   ISLE: 'ISLE',
   ISGT: 'ISGT',
   ISEQV: 'ISEQV',
   ISNEV: 'ISNEV',
-  JMP: 'JMP'
+  JMP: 'JMP',
+  CALL: 'CALL',
+  RET: 'RET',
+  FNEW: 'FNEW',
+  GC: 'GC',
+  ASETV: 'ASETV',
+  ANEW: 'ANEW',
+  AGETV: 'AGETV',
+  OGETV: 'OGETV'
 };
 
-// Fonction principale pour compiler un programme
+function newRegister(context) {
+  return `R${context.nextRegister++}`;
+}
+
+// Main function to compile a program
 async function compileProgram(code) {
   const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module" });
   const context = {
-    bytecode: [],
-    scopeStack: [new Map()], // Pile de scopes avec le scope global initialisé
+    bytecode: {
+      length: 0,
+      array: [],
+      push: function (line) {
+        context.bytecode.array.push(context.bytecode.length + (context.bytecode.length < 10 ? " " : "") + " - " + line);
+        context.bytecode.length++;
+      },
+      join: function (separator) {
+        return context.bytecode.array.join(separator);
+      }
+    },
+    scopeStack: [new Map()], // Stack of scopes with the global scope initialized
     nextRegister: 0,
-    labelCounter: 0
+    labelCounter: 0,
+    functions: new Map(), // Map to store functions
+    loopLabels: [] // Stack to manage loop labels for break statements
   };
+
+  // Add console as a global object with log as a function
+  context.scopeStack[0].set('print', console.log);
+
   await compileBlockStatement(ast, context);
   return context.bytecode;
 }
 
-// Fonction pour obtenir un registre pour une variable
+// Function to get a register for a variable
 function getRegister(context, name) {
-  // Chercher la variable dans le scope actuel
+  // Look for the variable in the current scope
   const currentScope = context.scopeStack[context.scopeStack.length - 1];
   if (!currentScope.has(name)) {
-    // Attribuer un nouveau registre si la variable n'est pas déclarée dans le scope actuel
-    const register = `R${context.nextRegister++}`;
+    // Assign a new register if the variable is not declared in the current scope
+    const register = newRegister(context);
     currentScope.set(name, register);
   }
   return currentScope.get(name);
 }
 
-// Fonction pour compiler un bloc de code
+// Function to compile a block of code
 async function compileBlockStatement(node, context) {
-  // Créer un nouveau scope pour ce bloc
+  // Create a new scope for this block
   context.scopeStack.push(new Map());
 
   for (const statement of node.body) {
     await compileStatement(statement, context);
   }
 
-  // Sortir du scope actuel
+  // Add GC instructions before exiting the current scope
+  emitGCInstructions(context);
+
+  // Exit the current scope
   context.scopeStack.pop();
 }
 
-// Fonction pour compiler une instruction
+// Function to emit GC instructions for the current scope
+function emitGCInstructions(context) {
+  const currentScope = context.scopeStack[context.scopeStack.length - 1];
+  currentScope.forEach(register => {
+    context.bytecode.push(`${OpCode.GC} ${register}`);
+  });
+}
+
+// Function to compile a statement
 async function compileStatement(node, context) {
   switch (node.type) {
     case 'VariableDeclaration':
@@ -69,20 +110,36 @@ async function compileStatement(node, context) {
       await compileExpression(node.expression, context);
       break;
     case 'ReturnStatement':
-      await compileExpression(node.argument, context);
+      const returnValue = await compileExpression(node.argument, context);
+      context.bytecode.push(`${OpCode.RET} ${returnValue}`);
       break;
     case 'IfStatement':
       await compileIfStatement(node, context);
       break;
+    case 'WhileStatement':
+      await compileWhileStatement(node, context);
+      break;
     case 'BlockStatement':
       await compileBlockStatement(node, context);
+      break;
+    case 'FunctionDeclaration':
+      await compileFunctionDeclaration(node, context);
+      break;
+    case 'BreakStatement':
+      compileBreakStatement(node, context);
       break;
     default:
       throw new Error(`Unsupported statement type: ${node.type}`);
   }
 }
 
-// Fonction pour compiler une déclaration de variable
+// Function to compile a break statement
+function compileBreakStatement(node, context) {
+  const labelEnd = context.loopLabels[context.loopLabels.length - 1].end;
+  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+}
+
+// Function to compile a variable declaration
 async function compileVariableDeclaration(node, context) {
   for (const declaration of node.declarations) {
     const name = declaration.id.name;
@@ -92,7 +149,55 @@ async function compileVariableDeclaration(node, context) {
   }
 }
 
-// Fonction pour compiler une expression
+// Function to compile an array expression
+async function compileArrayExpression(node, context) {
+  const register = newRegister(context); // Crée un nouveau registre pour le tableau
+
+  // Crée un tableau vide et réserve un registre pour ce tableau
+  context.bytecode.push(`${OpCode.ANEW} ${register}`);
+
+  // Traite chaque élément du tableau et les assigne à des indices dans le tableau
+  for (let i = 0; i < node.elements.length; i++) {
+    const element = node.elements[i];
+    const elementRegister = await compileExpression(element, context);
+    context.bytecode.push(`${OpCode.ASETV} ${register}, ${i}, ${elementRegister}`);
+  }
+
+  // add the new register to the current scope
+  const currentScope = context.scopeStack[context.scopeStack.length - 1];
+  currentScope.set(register, register);
+
+  return register; // Retourne le registre où le tableau est stocké
+}
+
+// Function to compile a member expression
+async function compileMemberExpression(node, context) {
+  const objectRegister = await compileExpression(node.object, context);
+
+  let propertyRegister;
+  if (node.computed) {
+    // Pour les accès calculés, comme B[C]
+    propertyRegister = await compileExpression(node.property, context);
+  } else {
+    // Pour les accès non calculés, comme B.C
+    propertyRegister = newRegister(context);
+    context.bytecode.push(`${OpCode.KSTR} ${propertyRegister}, "${node.property.name}"`);
+  }
+
+  const resultRegister = newRegister(context);
+
+  if (node.computed) {
+    // Si la propriété est un index calculé, nous accédons à un tableau
+    context.bytecode.push(`${OpCode.AGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
+  } else {
+    // Sinon, nous accédons à un objet
+    context.bytecode.push(`${OpCode.OGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
+  }
+
+  return resultRegister;
+}
+
+// Function to compile an expression
 async function compileExpression(node, context) {
   switch (node.type) {
     case 'Literal':
@@ -104,15 +209,20 @@ async function compileExpression(node, context) {
     case 'AssignmentExpression':
       return await compileAssignmentExpression(node, context);
     case 'CallExpression':
+      console.log(require('util').inspect(node, false, null, true /* enable colors */));
       return await compileCallExpression(node, context);
+    case 'ArrayExpression':
+      return await compileArrayExpression(node, context);
+    case 'MemberExpression':
+      return await compileMemberExpression(node, context);
     default:
       throw new Error(`Unsupported expression type: ${node.type}`);
   }
 }
 
-// Fonction pour compiler un littéral
+// Function to compile a literal
 function compileLiteral(node, context) {
-  const register = `R${context.nextRegister++}`;
+  const register = newRegister(context);
   if (typeof node.value === 'number') {
     context.bytecode.push(`${OpCode.KNUM} ${register}, ${node.value}`);
   } else if (typeof node.value === 'string') {
@@ -123,10 +233,14 @@ function compileLiteral(node, context) {
   } else if (node.value === null) {
     context.bytecode.push(`${OpCode.KNULL} ${register}`);
   }
+
+  // add the new register to the current scope
+  const currentScope = context.scopeStack[context.scopeStack.length - 1];
+  currentScope.set(register, register);
   return register;
 }
 
-// Résoudre un identifiant en cherchant dans les scopes
+// Resolve an identifier by looking through scopes
 function resolveIdentifier(context, name) {
   for (let i = context.scopeStack.length - 1; i >= 0; i--) {
     const scope = context.scopeStack[i];
@@ -137,42 +251,42 @@ function resolveIdentifier(context, name) {
   throw new Error(`Identifier ${name} not found`);
 }
 
-// Fonction pour compiler une expression binaire
+// Function to compile a binary expression
 async function compileBinaryExpression(node, context) {
   const leftReg = await compileExpression(node.left, context);
   const rightReg = await compileExpression(node.right, context);
-  const resultReg = `R${context.nextRegister++}`;
+  const resultReg = newRegister(context);
 
   switch (node.operator) {
     case '+':
       context.bytecode.push(`${OpCode.ADDVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     case '-':
-      context.bytecode.push(`SUBVV ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.SUBVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     case '*':
-      context.bytecode.push(`MULVV ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.MULVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     case '/':
-      context.bytecode.push(`DIVVV ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.DIVVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     case '<':
-      context.bytecode.push(`${OpCode.ISLT} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISLT} , ${leftReg}, ${rightReg}`);
       break;
     case '>':
-      context.bytecode.push(`${OpCode.ISGT} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISGT} , ${leftReg}, ${rightReg}`);
       break;
     case '<=':
-      context.bytecode.push(`${OpCode.ISLE} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISLE} , ${leftReg}, ${rightReg}`);
       break;
     case '>=':
-      context.bytecode.push(`${OpCode.ISGE} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISGE} , ${leftReg}, ${rightReg}`);
       break;
     case '==':
-      context.bytecode.push(`${OpCode.ISEQV} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`);
       break;
     case '!=':
-      context.bytecode.push(`${OpCode.ISNEV} ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISNEV} , ${leftReg}, ${rightReg}`);
       break;
     default:
       throw new Error(`Unsupported binary operator: ${node.operator}`);
@@ -180,7 +294,7 @@ async function compileBinaryExpression(node, context) {
   return resultReg;
 }
 
-// Fonction pour compiler une expression d'affectation
+// Function to compile an assignment expression
 async function compileAssignmentExpression(node, context) {
   if (node.left.type !== 'Identifier') {
     throw new Error(`Unsupported left-hand side in assignment: ${node.left.type}`);
@@ -188,7 +302,7 @@ async function compileAssignmentExpression(node, context) {
 
   const destReg = resolveIdentifier(context, node.left.name);
 
-  // Vérifie si le côté droit est une constante ou une variable
+  // Check if the right side is a constant or a variable
   if (node.right.type === 'Literal') {
     const literalReg = compileLiteral(node.right, context);
     context.bytecode.push(`${OpCode.MOV} ${destReg}, ${literalReg}`);
@@ -203,59 +317,122 @@ async function compileAssignmentExpression(node, context) {
   return destReg;
 }
 
-// Fonction pour compiler une instruction if
+// Function to compile an if statement
 async function compileIfStatement(node, context) {
   const testReg = await compileExpression(node.test, context);
   const consequent = node.consequent;
   const alternate = node.alternate;
-  // Comparaison suivie d'un saut conditionnel
-  context.bytecode.push(`JMP :${++context.labelCounter}:`);
-  //context.bytecode.push(`${testReg}:`);
-  await compileStatement(consequent, context);
-  context.bytecode.push(`:${context.labelCounter}:`);
+
+  const labelTrue = `L${++context.labelCounter}`;
+  const labelEnd = `L${++context.labelCounter}`;
+
+  context.bytecode.push(`${OpCode.JMP} ${labelTrue}`);
+
+  // Compile alternate (else) block
   if (alternate) {
     await compileStatement(alternate, context);
   }
-  
+  // Jump to end after alternate block
+  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+
+  // Compile consequent (if) block
+  context.bytecode.push(`${labelTrue}:`);
+  await compileStatement(consequent, context);
+
+  context.bytecode.push(`${labelEnd}:`);
 }
 
-// Fonction pour compiler un appel de fonction
+// Function to compile a while statement
+async function compileWhileStatement(node, context) {
+  const labelStart = `L${++context.labelCounter}`;
+  const labelEnd = `L${++context.labelCounter}`;
+
+  // Push the current loop's labels onto the loopLabels stack
+  context.loopLabels.push({ start: labelStart, end: labelEnd });
+
+  // Label for the beginning of the loop
+  context.bytecode.push(`${labelStart}:`);
+
+  // Evaluate the test condition
+  const testReg = await compileExpression(node.test, context);
+  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+
+  // Compile the loop body
+  await compileStatement(node.body, context);
+
+  // Jump back to the start of the loop
+  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+
+  // Label for the end of the loop
+  context.bytecode.push(`${labelEnd}:`);
+
+  // Pop the current loop's labels off the loopLabels stack
+  context.loopLabels.pop();
+}
+
+// Function to compile a function declaration
+async function compileFunctionDeclaration(node, context) {
+  const functionName = node.id.name;
+  const functionRegister = getRegister(context, functionName);
+
+  // Emit FNEW instruction to create a new function
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+
+  // Create a new scope for the function parameters and body
+  const functionScope = new Map();
+  context.scopeStack.push(functionScope);
+
+  // Push function parameters into the function scope
+  let paramCount = 0;
+
+  node.params.forEach(param => {
+    const paramName = param.name;
+    const paramRegister = getRegister(context, paramName);
+    context.bytecode.push(`${OpCode.MOV} ${paramRegister}, ${paramCount++}`);
+  });
+
+  // Compile the body of the function
+  await compileBlockStatement(node.body, context);
+
+  // Add RET instruction to return from the function
+  context.bytecode.push(`${OpCode.RET} 0`);
+
+  // Exit the function scope
+  context.scopeStack.pop();
+}
+
+// Update the compileCallExpression function to handle function calls
 async function compileCallExpression(node, context) {
-  const calleeReg = await compileExpression(node.callee, context);
-  const args = await Promise.all(node.arguments.map(arg => compileExpression(arg, context)));
-  context.bytecode.push(`CALL ${calleeReg}, ${args.join(', ')}`);
-  const resultReg = `R${context.nextRegister++}`;
-  context.bytecode.push(`MOV ${resultReg}, RRET`);
-  return resultReg;
+  const funcName = node.callee.name;
+  const funcRegister = resolveIdentifier(context, funcName);
+
+  // Prepare arguments
+  const args = [];
+  for (const arg of node.arguments) {
+    args.push(await compileExpression(arg, context));
+  }
+
+  // Call the function
+  context.bytecode.push(`${OpCode.CALL} ${funcRegister}, ${args.join(', ')}`);
 }
 
-// Exemple d'utilisation
+// Example usage
 (async () => {
   let code = `
-    let a = 1 + 1;
-    let b = a + 2;
-    {
-      let c = 3 + b;
-      if (c > a) {
-        let d = c - a;
-        b = d + a;
-      }
-    }
-    let e = a + b;
+    //let g = 1
+    //let f = 1
+    //
+    //if (g == f) {
+    //  let a = 1
+    //} else if (g != 2) {
+    //  let b = 3
+    //} else {
+    //  let c = 4
+    //}
 
-    {
-      b = 1;
-      b = 2
-    }
-
-    if(true){
-        let x = 1
-    }else{
-        let y = 2
-    }
-
-    function fun(){
-
+    for (let i = 0; i < 10; i++) {
+      let a = 1
+      let b = 2
     }
   `;
 
