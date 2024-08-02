@@ -1,5 +1,5 @@
 const acorn = require('acorn');
-
+const fs = require('fs');
 // Enumeration for opcodes
 const OpCode = {
   KNUM: 'KNUM',
@@ -28,7 +28,25 @@ const OpCode = {
   ASETV: 'ASETV',
   ANEW: 'ANEW',
   AGETV: 'AGETV',
-  OGETV: 'OGETV'
+  ONEW: 'ONEW',
+  OSETV: 'OSETV',
+  OGETV: 'OGETV',
+  BANDVV: 'BANDVV',
+  BORVV: 'BORVV',
+  BXORVV: 'BXORVV',
+  LSHVV: 'LSHVV',
+  RSHVV: 'RSHVV',
+  ULSHVV: 'ULSHVV',
+  URSHVV: 'URSHVV',
+  ANDVV: 'ANDVV',
+  ORVV: 'ORVV',
+  MODVV: 'MODVV',
+  POWVV: 'POWVV',
+  ISFC: 'ISFC',
+  ISTC: 'ISTC',
+  NOT: 'NOT',
+  UNM: 'UNM',
+  XOR: 'XOR'
 };
 
 function newRegister(context) {
@@ -59,6 +77,7 @@ async function compileProgram(code) {
 
   // Add console as a global object with log as a function
   context.scopeStack[0].set('print', console.log);
+  context.scopeStack[0].set('console', console);
 
   await compileBlockStatement(ast, context);
   return context.bytecode;
@@ -92,6 +111,49 @@ async function compileBlockStatement(node, context) {
   context.scopeStack.pop();
 }
 
+// Function to compile a for statement
+// Function to compile a for statement
+async function compileForStatement(node, context) {
+  const labelStart = `L${++context.labelCounter}`;
+  const labelEnd = `L${++context.labelCounter}`;
+
+  // Compile initializer
+  if (node.init) {
+    await compileStatement(node.init, context);
+  }
+
+  // Push the current loop's labels onto the loopLabels stack
+  context.loopLabels.push({ start: labelStart, end: labelEnd });
+
+  // Label for the beginning of the loop
+  context.bytecode.push(`${labelStart}:`);
+
+  // Compile test condition
+  if (node.test) {
+    const testReg = await compileExpression(node.test, context);
+    // If the test fails, jump to the end
+    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  }
+
+  // Compile the loop body
+  await compileStatement(node.body, context);
+
+  // Compile update expression
+  if (node.update) {
+    await compileExpression(node.update, context);
+  }
+
+  // Jump back to the start of the loop
+  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+
+  // Label for the end of the loop
+  context.bytecode.push(`${labelEnd}:`);
+
+  // Pop the current loop's labels off the loopLabels stack
+  context.loopLabels.pop();
+}
+
+
 // Function to emit GC instructions for the current scope
 function emitGCInstructions(context) {
   const currentScope = context.scopeStack[context.scopeStack.length - 1];
@@ -100,7 +162,70 @@ function emitGCInstructions(context) {
   });
 }
 
-// Function to compile a statement
+async function compileForOfStatement(node, context) {
+  const iterableReg = await compileExpression(node.right, context); // Compile the iterable expression
+  const iteratorReg = newRegister(context); // Register for the iterator
+  const resultReg = newRegister(context);   // Register for the current iteration result
+  const doneReg = newRegister(context);     // Register to check if the iteration is done
+
+  // Get the iterator from the iterable
+  context.bytecode.push(`${OpCode.CALL} ${iteratorReg}, ${iterableReg}[Symbol.iterator]`);
+
+  const labelStart = `L${++context.labelCounter}`; // Start of the loop
+  const labelEnd = `L${++context.labelCounter}`;   // End of the loop
+
+  context.bytecode.push(`${labelStart}:`);
+
+  // Get the next value from the iterator
+  context.bytecode.push(`${OpCode.CALL} ${resultReg}, ${iteratorReg}.next`);
+
+  // Check if the iteration is done
+  context.bytecode.push(`${OpCode.MOV} ${doneReg}, ${resultReg}.done`);
+  context.bytecode.push(`${OpCode.ISNEV} , ${doneReg}, true`);
+  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+
+  // Extract the value from the iteration result
+  const valueReg = newRegister(context);
+  context.bytecode.push(`${OpCode.MOV} ${valueReg}, ${resultReg}.value`);
+
+  // Handle variable declaration or assignment
+  if (node.left.type === 'VariableDeclaration') {
+    // Only support `let` and `const` for now
+    const declaration = node.left.declarations[0];
+    const varName = declaration.id.name;
+    const varReg = getRegister(context, varName);
+    context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+  } else if (node.left.type === 'Identifier') {
+    const varReg = resolveIdentifier(context, node.left.name);
+    context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+  } else {
+    throw new Error(`Unsupported left-hand side in for-of: ${node.left.type}`);
+  }
+
+  // Compile the loop body
+  await compileStatement(node.body, context);
+
+  // Jump back to the start of the loop
+  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+
+  // Label for the end of the loop
+  context.bytecode.push(`${labelEnd}:`);
+}
+
+// Function to compile a continue statement
+function compileContinueStatement(node, context) {
+  if (context.loopLabels.length === 0) {
+    throw new Error(`'continue' used outside of a loop`);
+  }
+
+  // Get the current loop's start label
+  const labelStart = context.loopLabels[context.loopLabels.length - 1].start;
+
+  // Emit jump to the start of the loop
+  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+}
+
+// Extend the compileStatement function to handle ContinueStatement
 async function compileStatement(node, context) {
   switch (node.type) {
     case 'VariableDeclaration':
@@ -119,6 +244,12 @@ async function compileStatement(node, context) {
     case 'WhileStatement':
       await compileWhileStatement(node, context);
       break;
+    case 'ForStatement':
+      await compileForStatement(node, context);
+      break;
+    case 'ForOfStatement':
+      await compileForOfStatement(node, context);
+      break;
     case 'BlockStatement':
       await compileBlockStatement(node, context);
       break;
@@ -127,6 +258,9 @@ async function compileStatement(node, context) {
       break;
     case 'BreakStatement':
       compileBreakStatement(node, context);
+      break;
+    case 'ContinueStatement':
+      compileContinueStatement(node, context);
       break;
     default:
       throw new Error(`Unsupported statement type: ${node.type}`);
@@ -170,6 +304,41 @@ async function compileArrayExpression(node, context) {
   return register; // Retourne le registre où le tableau est stocké
 }
 
+async function compileUpdateExpression(node, context) {
+  // Resolve the register for the variable being updated
+  const argReg = resolveIdentifier(context, node.argument.name);
+
+  // Determine the operation based on the operator
+  let opcode;
+  switch (node.operator) {
+    case '++':
+      opcode = OpCode.ADDVV;
+      break;
+    case '--':
+      opcode = OpCode.SUBVV;
+      break;
+    default:
+      throw new Error(`Unsupported update operator: ${node.operator}`);
+  }
+
+  // Create a new register for the constant 1
+  const oneReg = newRegister(context);
+  context.bytecode.push(`${OpCode.KNUM} ${oneReg}, 1`);
+
+  // Apply the operation and update the register
+  context.bytecode.push(`${opcode} ${argReg}, ${argReg}, ${oneReg}`);
+
+  // If the expression is a prefix operation, return the updated value
+  if (node.prefix) {
+    return argReg;
+  } else {
+    // For postfix, create a temporary register to store the original value
+    const tempReg = newRegister(context);
+    context.bytecode.push(`${OpCode.MOV} ${tempReg}, ${argReg}`);
+    return tempReg;
+  }
+}
+
 // Function to compile a member expression
 async function compileMemberExpression(node, context) {
   const objectRegister = await compileExpression(node.object, context);
@@ -197,6 +366,110 @@ async function compileMemberExpression(node, context) {
   return resultRegister;
 }
 
+async function compileObjectExpression(node, context) {
+  const objectRegister = newRegister(context); // Create a new register for the object
+
+  // Emit instruction to create a new object
+  context.bytecode.push(`${OpCode.ONEW} ${objectRegister}`); // Reuse ANEW opcode for object creation
+
+  for (const property of node.properties) {
+    // Compile the property value
+    const valueRegister = await compileExpression(property.value, context);
+
+    // Handle computed and non-computed keys
+    let keyRegister;
+    if (property.computed) {
+      keyRegister = await compileExpression(property.key, context);
+    } else {
+      keyRegister = newRegister(context);
+      context.bytecode.push(`${OpCode.KSTR} ${keyRegister}, "${property.key.name || property.key.value}"`);
+    }
+
+    // Assign the value to the object using the key
+    context.bytecode.push(`${OpCode.OGETV} ${objectRegister}, ${keyRegister}, ${valueRegister}`);
+  }
+
+  // Add the new register to the current scope
+  const currentScope = context.scopeStack[context.scopeStack.length - 1];
+  currentScope.set(objectRegister, objectRegister);
+
+  return objectRegister; // Return the register where the object is stored
+}
+
+async function compileLogicalExpression(node, context) {
+  const leftReg = await compileExpression(node.left, context);
+  const resultReg = newRegister(context);
+
+  const labelEnd = `L${++context.labelCounter}`;
+  const labelRightEval = `L${++context.labelCounter}`;
+
+  if (node.operator === '&&') {
+    // For '&&', if the left is false, jump to the end
+    context.bytecode.push(`${OpCode.ISFC} ${leftReg}, ${labelRightEval}`);
+    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  } else if (node.operator === '||') {
+    // For '||', if the left is true, jump to the end
+    context.bytecode.push(`${OpCode.ISTC} ${leftReg}, ${labelRightEval}`);
+    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  } else {
+    throw new Error(`Unsupported logical operator: ${node.operator}`);
+  }
+
+  // Label to evaluate the right operand
+  context.bytecode.push(`${labelRightEval}:`);
+  const rightReg = await compileExpression(node.right, context);
+  context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${rightReg}`);
+  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+
+  // Label for the end of the expression
+  context.bytecode.push(`${labelEnd}:`);
+  context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${leftReg}`);
+
+  return resultReg;
+}
+
+async function compileUnaryExpression(node, context) {
+  const resultReg = newRegister(context);
+
+  if (node.operator === 'delete') {
+    if (node.argument.type !== 'MemberExpression') {
+      throw new Error(`'delete' operator requires a MemberExpression`);
+    }
+
+    throw new Error(`'delete' operator is not supported`);
+
+    return resultReg;
+  } else {
+    const argReg = await compileExpression(node.argument, context);
+
+    switch (node.operator) {
+      case '-':
+        // Unary minus: Set result to negative of the argument
+        context.bytecode.push(`${OpCode.UNM} ${resultReg}, ${argReg}`);
+        break;
+      case '!':
+        // Logical NOT: Set result to boolean not of the argument
+        context.bytecode.push(`${OpCode.NOT} ${resultReg}, ${argReg}`);
+        break;
+      case '+':
+        // Unary plus: Simply copy the argument to the result
+        context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${argReg}`);
+        break;
+      case '~':
+        // Bitwise NOT: Typically requires XOR with -1
+        const allOnesReg = newRegister(context);
+        context.bytecode.push(`${OpCode.MOV} ${allOnesReg}, -1`);
+        context.bytecode.push(`${OpCode.XOR} ${resultReg}, ${argReg}, ${allOnesReg}`);
+        break;
+      default:
+        throw new Error(`Unsupported unary operator: ${node.operator}`);
+    }
+
+    return resultReg;
+  }
+}
+
+
 // Function to compile an expression
 async function compileExpression(node, context) {
   switch (node.type) {
@@ -215,7 +488,16 @@ async function compileExpression(node, context) {
       return await compileArrayExpression(node, context);
     case 'MemberExpression':
       return await compileMemberExpression(node, context);
+    case 'UpdateExpression':
+      return await compileUpdateExpression(node, context);
+    case 'ObjectExpression':
+      return await compileObjectExpression(node, context);
+    case 'LogicalExpression':
+      return await compileLogicalExpression(node, context);
+    case 'UnaryExpression':
+      return await compileUnaryExpression(node, context);
     default:
+      console.log(require('util').inspect(node, false, null, true /* enable colors */));
       throw new Error(`Unsupported expression type: ${node.type}`);
   }
 }
@@ -228,7 +510,8 @@ function compileLiteral(node, context) {
   } else if (typeof node.value === 'string') {
     context.bytecode.push(`${OpCode.KSTR} ${register}, "${node.value}"`);
   } else if (typeof node.value === 'boolean') {
-    const priValue = node.value ? 2 : 1; // true -> 2, false -> 1
+    console.log(node);
+    const priValue = node.value ? 1 : 0; // true -> 2, false -> 1
     context.bytecode.push(`${OpCode.KPRI} ${register}, ${priValue}`);
   } else if (node.value === null) {
     context.bytecode.push(`${OpCode.KNULL} ${register}`);
@@ -270,6 +553,27 @@ async function compileBinaryExpression(node, context) {
     case '/':
       context.bytecode.push(`${OpCode.DIVVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
+    case '&':
+      context.bytecode.push(`${OpCode.BANDVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '|':
+      context.bytecode.push(`${OpCode.BORVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '^':
+      context.bytecode.push(`${OpCode.BXORVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '<<':
+      context.bytecode.push(`${OpCode.LSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '>>':
+      context.bytecode.push(`${OpCode.RSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '<<<':
+      context.bytecode.push(`${OpCode.ULSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '>>>':
+      context.bytecode.push(`${OpCode.URSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
     case '<':
       context.bytecode.push(`${OpCode.ISLT} , ${leftReg}, ${rightReg}`);
       break;
@@ -282,11 +586,23 @@ async function compileBinaryExpression(node, context) {
     case '>=':
       context.bytecode.push(`${OpCode.ISGE} , ${leftReg}, ${rightReg}`);
       break;
+    case '===':
+      context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`); // voir si c'est bien ISEQV
+      break;
     case '==':
       context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`);
       break;
     case '!=':
       context.bytecode.push(`${OpCode.ISNEV} , ${leftReg}, ${rightReg}`);
+      break;
+    case '!==':
+      context.bytecode.push(`${OpCode.ISNEV} , ${leftReg}, ${rightReg}`); // voir si c'est bien ISNEV
+      break;
+    case '%':
+      context.bytecode.push(`${OpCode.MODVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      break;
+    case '**':
+      context.bytecode.push(`${OpCode.POWVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     default:
       throw new Error(`Unsupported binary operator: ${node.operator}`);
@@ -294,27 +610,56 @@ async function compileBinaryExpression(node, context) {
   return resultReg;
 }
 
-// Function to compile an assignment expression
 async function compileAssignmentExpression(node, context) {
-  if (node.left.type !== 'Identifier') {
+  if (node.left.type === 'Identifier') {
+    const destReg = resolveIdentifier(context, node.left.name);
+
+    // Check if the right side is a constant or a variable
+    if (node.right.type === 'Literal') {
+      const literalReg = compileLiteral(node.right, context);
+      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${literalReg}`);
+    } else if (node.right.type === 'Identifier') {
+      const sourceReg = resolveIdentifier(context, node.right.name);
+      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${sourceReg}`);
+
+    } else {
+      const valueReg = await compileExpression(node.right, context);
+      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${valueReg}`);
+    }
+
+    return destReg;
+  } else if (node.left.type === 'MemberExpression') {
+    // Handle assignment to object properties or array elements
+    return await compileMemberAssignmentExpression(node, context);
+  } else {
     throw new Error(`Unsupported left-hand side in assignment: ${node.left.type}`);
   }
+}
 
-  const destReg = resolveIdentifier(context, node.left.name);
+// Function to compile member assignment expressions
+async function compileMemberAssignmentExpression(node, context) {
+  const objectReg = await compileExpression(node.left.object, context);
+  let propertyReg;
 
-  // Check if the right side is a constant or a variable
-  if (node.right.type === 'Literal') {
-    const literalReg = compileLiteral(node.right, context);
-    context.bytecode.push(`${OpCode.MOV} ${destReg}, ${literalReg}`);
-  } else if (node.right.type === 'Identifier') {
-    const sourceReg = resolveIdentifier(context, node.right.name);
-    context.bytecode.push(`${OpCode.MOV} ${destReg}, ${sourceReg}`);
+  // Determine if the property is computed or not
+  if (node.left.computed) {
+    propertyReg = await compileExpression(node.left.property, context);
   } else {
-    const valueReg = await compileExpression(node.right, context);
-    context.bytecode.push(`${OpCode.MOV} ${destReg}, ${valueReg}`);
+    propertyReg = newRegister(context);
+    context.bytecode.push(`${OpCode.KSTR} ${propertyReg}, "${node.left.property.name}"`);
   }
 
-  return destReg;
+  const valueReg = await compileExpression(node.right, context);
+
+  if (node.left.computed) {
+    // For array elements (computed properties)
+    context.bytecode.push(`${OpCode.ASETV} ${objectReg}, ${propertyReg}, ${valueReg}`);
+  } else {
+    // For object properties (non-computed properties)
+    context.bytecode.push(`${OpCode.OSETV} ${objectReg}, ${propertyReg}, ${valueReg}`);
+  }
+
+  return valueReg;
 }
 
 // Function to compile an if statement
@@ -343,6 +688,7 @@ async function compileIfStatement(node, context) {
 }
 
 // Function to compile a while statement
+// Function to compile a while statement
 async function compileWhileStatement(node, context) {
   const labelStart = `L${++context.labelCounter}`;
   const labelEnd = `L${++context.labelCounter}`;
@@ -369,6 +715,7 @@ async function compileWhileStatement(node, context) {
   // Pop the current loop's labels off the loopLabels stack
   context.loopLabels.pop();
 }
+
 
 // Function to compile a function declaration
 async function compileFunctionDeclaration(node, context) {
@@ -418,24 +765,19 @@ async function compileCallExpression(node, context) {
 
 // Example usage
 (async () => {
-  let code = `
-    //let g = 1
-    //let f = 1
-    //
-    //if (g == f) {
-    //  let a = 1
-    //} else if (g != 2) {
-    //  let b = 3
-    //} else {
-    //  let c = 4
-    //}
 
-    for (let i = 0; i < 10; i++) {
-      let a = 1
-      let b = 2
-    }
-  `;
 
-  const bytecode = await compileProgram(code);
-  console.log(bytecode.join('\n'));
+
+  // loop in test folder
+
+  const testFolder = "./test/";
+  const files = fs.readdirSync(testFolder);
+
+  files.forEach(async (file) => {
+    const data = fs.readFileSync(testFolder + file, "utf8");
+    const bytecode = await compileProgram(data);
+    
+    console.log(`Bytecode for ${file}:`);
+    console.log(bytecode.join('\n'));
+  });
 })();
