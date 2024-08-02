@@ -2,7 +2,6 @@ const acorn = require('acorn');
 const fs = require('fs');
 // Enumeration for opcodes
 const OpCode = {
-  KNUM: 'KNUM',
   ADDVN: 'ADDVN',
   ADDNV: 'ADDNV',
   ADDVV: 'ADDVV',
@@ -11,6 +10,8 @@ const OpCode = {
   MULVV: 'MULVV',
   DIVVV: 'DIVVV',
   MOV: 'MOV',
+  KNUM: 'KNUM',
+  KBIG: 'KBIG',
   KSTR: 'KSTR',
   KPRI: 'KPRI',
   KNULL: 'KNULL',
@@ -46,38 +47,73 @@ const OpCode = {
   ISTC: 'ISTC',
   NOT: 'NOT',
   UNM: 'UNM',
-  XOR: 'XOR'
+  XOR: 'XOR',
+  GGET: 'GGET',
+  GSET: 'GSET',
 };
 
 function newRegister(context) {
-  return `R${context.nextRegister++}`;
+
+  // print the used registers
+
+  console.log(context.freeRegisters);
+  
+  if (context.freeRegisters.length > 0) {
+    // Reuse a register from the free pool
+    return context.freeRegisters.pop();
+  } else {
+    // Allocate a new register
+    context.nextRegister = context.nextRegister + 1;
+    const r = `R${context.nextRegister}`
+    return r;
+  }
 }
 
-// Main function to compile a program
+function freeRegister(context, register) {
+  context.bytecode.push(`${OpCode.GC} ${register}`);
+  context.freeRegisters.push(register);
+}
+
+function pushFunction(name, func, context) {
+  context.globalTable.set(name, func);
+}
+
+// Function to push a global object into the global table
+function pushGlobal(name, value, context) {
+  context.globalTable.set(name, value);
+}
+
 async function compileProgram(code) {
   const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module" });
+
+  console.log(require("util").inspect(ast, false, null, true /* enable colors */));
+
   const context = {
     bytecode: {
       length: 0,
       array: [],
       push: function (line) {
-        context.bytecode.array.push(context.bytecode.length + (context.bytecode.length < 10 ? " " : "") + " - " + line);
+        context.bytecode.array.push(
+          context.bytecode.length + (context.bytecode.length < 10 ? " " : "") + " - " + line
+        );
         context.bytecode.length++;
       },
       join: function (separator) {
         return context.bytecode.array.join(separator);
-      }
+      },
     },
     scopeStack: [new Map()], // Stack of scopes with the global scope initialized
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(), // Map to store functions
-    loopLabels: [] // Stack to manage loop labels for break statements
+    loopLabels: [], // Stack to manage loop labels for break statements
+    freeRegisters: [], // Pool of free registers
+    globalTable: new Map(), // Global table to store global variables
   };
 
   // Add console as a global object with log as a function
-  context.scopeStack[0].set('print', console.log);
-  context.scopeStack[0].set('console', console);
+  pushGlobal("console", console, context);
+  pushFunction("log", console.log, context);
 
   await compileBlockStatement(ast, context);
   return context.bytecode;
@@ -153,12 +189,21 @@ async function compileForStatement(node, context) {
   context.loopLabels.pop();
 }
 
-
 // Function to emit GC instructions for the current scope
 function emitGCInstructions(context) {
   const currentScope = context.scopeStack[context.scopeStack.length - 1];
   currentScope.forEach(register => {
-    context.bytecode.push(`${OpCode.GC} ${register}`);
+    //context.bytecode.push(`${OpCode.GC} ${register}`);
+    // check if the register is in the free pool
+    if (!context.freeRegisters.includes(register)) {
+      // Remove the register from the free pool
+      
+      //const index = context.freeRegisters.indexOf(register);
+      //context.freeRegisters.splice(index, 1);
+      
+      freeRegister(context, register); // Mark the register as reusable
+    }
+   
   });
 }
 
@@ -262,6 +307,8 @@ async function compileStatement(node, context) {
     case 'ContinueStatement':
       compileContinueStatement(node, context);
       break;
+    case 'EmptyStatement':
+      break;
     default:
       throw new Error(`Unsupported statement type: ${node.type}`);
   }
@@ -280,13 +327,14 @@ async function compileVariableDeclaration(node, context) {
     const destReg = getRegister(context, name);
     const value = await compileExpression(declaration.init, context);
     context.bytecode.push(`${OpCode.MOV} ${destReg}, ${value}`);
+    freeRegister(context, value);
   }
 }
 
 // Function to compile an array expression
 async function compileArrayExpression(node, context) {
-  const register = newRegister(context); // Crée un nouveau registre pour le tableau
-
+  //throw new Error("Not implemented yet");
+  const register = newRegister(context);
   // Crée un tableau vide et réserve un registre pour ce tableau
   context.bytecode.push(`${OpCode.ANEW} ${register}`);
 
@@ -295,11 +343,9 @@ async function compileArrayExpression(node, context) {
     const element = node.elements[i];
     const elementRegister = await compileExpression(element, context);
     context.bytecode.push(`${OpCode.ASETV} ${register}, ${i}, ${elementRegister}`);
+    // Libère le registre de l'élément après utilisation
+    freeRegister(context, elementRegister);
   }
-
-  // add the new register to the current scope
-  const currentScope = context.scopeStack[context.scopeStack.length - 1];
-  currentScope.set(register, register);
 
   return register; // Retourne le registre où le tableau est stocké
 }
@@ -345,10 +391,10 @@ async function compileMemberExpression(node, context) {
 
   let propertyRegister;
   if (node.computed) {
-    // Pour les accès calculés, comme B[C]
+    // For computed properties, like console['log']
     propertyRegister = await compileExpression(node.property, context);
   } else {
-    // Pour les accès non calculés, comme B.C
+    // For non-computed properties, like console.log
     propertyRegister = newRegister(context);
     context.bytecode.push(`${OpCode.KSTR} ${propertyRegister}, "${node.property.name}"`);
   }
@@ -356,15 +402,16 @@ async function compileMemberExpression(node, context) {
   const resultRegister = newRegister(context);
 
   if (node.computed) {
-    // Si la propriété est un index calculé, nous accédons à un tableau
+    // If the property is an index, access it as an array
     context.bytecode.push(`${OpCode.AGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
   } else {
-    // Sinon, nous accédons à un objet
+    // Otherwise, access it as an object property
     context.bytecode.push(`${OpCode.OGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
   }
 
   return resultRegister;
 }
+
 
 async function compileObjectExpression(node, context) {
   const objectRegister = newRegister(context); // Create a new register for the object
@@ -390,8 +437,6 @@ async function compileObjectExpression(node, context) {
   }
 
   // Add the new register to the current scope
-  const currentScope = context.scopeStack[context.scopeStack.length - 1];
-  currentScope.set(objectRegister, objectRegister);
 
   return objectRegister; // Return the register where the object is stored
 }
@@ -431,108 +476,146 @@ async function compileLogicalExpression(node, context) {
 async function compileUnaryExpression(node, context) {
   const resultReg = newRegister(context);
 
-  if (node.operator === 'delete') {
-    if (node.argument.type !== 'MemberExpression') {
-      throw new Error(`'delete' operator requires a MemberExpression`);
-    }
+  if (node.operator === "delete") {
+    if (node.argument.type === "MemberExpression") {
+      throw new Error(`Unsupported argument for 'delete': ${node.argument.type}`);
+    } else if (node.argument.type === "Identifier") {
+      // For deleting a variable, set it to null and perform GC
+      const varReg = resolveIdentifier(context, node.argument.name);
+      const nullReg = newRegister(context);
+      context.bytecode.push(`${OpCode.KNULL} ${nullReg}`);
+      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${nullReg}`);
+      context.bytecode.push(`${OpCode.GC} ${varReg}`);
 
-    throw new Error(`'delete' operator is not supported`);
+      // Set the result register to indicate success
+      context.bytecode.push(`${OpCode.KPRI} ${resultReg}, 1`);
+
+      // Free the null register
+      //freeRegister(context, nullReg);
+    } else {
+      throw new Error(`Unsupported argument for 'delete': ${node.argument.type}`);
+    }
 
     return resultReg;
   } else {
     const argReg = await compileExpression(node.argument, context);
 
     switch (node.operator) {
-      case '-':
+      case "-":
         // Unary minus: Set result to negative of the argument
         context.bytecode.push(`${OpCode.UNM} ${resultReg}, ${argReg}`);
         break;
-      case '!':
+      case "!":
         // Logical NOT: Set result to boolean not of the argument
         context.bytecode.push(`${OpCode.NOT} ${resultReg}, ${argReg}`);
         break;
-      case '+':
+      case "+":
         // Unary plus: Simply copy the argument to the result
         context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${argReg}`);
         break;
-      case '~':
+      case "~":
         // Bitwise NOT: Typically requires XOR with -1
         const allOnesReg = newRegister(context);
         context.bytecode.push(`${OpCode.MOV} ${allOnesReg}, -1`);
         context.bytecode.push(`${OpCode.XOR} ${resultReg}, ${argReg}, ${allOnesReg}`);
+        //freeRegister(context, allOnesReg);
         break;
       default:
         throw new Error(`Unsupported unary operator: ${node.operator}`);
     }
 
+    //freeRegister(context, argReg);
     return resultReg;
   }
 }
 
-
 // Function to compile an expression
 async function compileExpression(node, context) {
   switch (node.type) {
-    case 'Literal':
+    case "Literal":
       return compileLiteral(node, context);
-    case 'Identifier':
+    case "Identifier":
       return resolveIdentifier(context, node.name);
-    case 'BinaryExpression':
+    case "BinaryExpression":
       return await compileBinaryExpression(node, context);
-    case 'AssignmentExpression':
+    case "AssignmentExpression":
       return await compileAssignmentExpression(node, context);
-    case 'CallExpression':
-      console.log(require('util').inspect(node, false, null, true /* enable colors */));
+    case "CallExpression":
       return await compileCallExpression(node, context);
-    case 'ArrayExpression':
+    case "ArrayExpression":
       return await compileArrayExpression(node, context);
-    case 'MemberExpression':
+    case "MemberExpression":
       return await compileMemberExpression(node, context);
-    case 'UpdateExpression':
+    case "UpdateExpression":
       return await compileUpdateExpression(node, context);
-    case 'ObjectExpression':
+    case "ObjectExpression":
       return await compileObjectExpression(node, context);
-    case 'LogicalExpression':
+    case "LogicalExpression":
       return await compileLogicalExpression(node, context);
-    case 'UnaryExpression':
+    case "UnaryExpression":
       return await compileUnaryExpression(node, context);
     default:
-      console.log(require('util').inspect(node, false, null, true /* enable colors */));
+      console.log(require("util").inspect(node, false, null, true /* enable colors */));
       throw new Error(`Unsupported expression type: ${node.type}`);
   }
 }
 
 // Function to compile a literal
+// Function to compile a literal
 function compileLiteral(node, context) {
   const register = newRegister(context);
   if (typeof node.value === 'number') {
     context.bytecode.push(`${OpCode.KNUM} ${register}, ${node.value}`);
+  } else if (typeof node.value === 'bigint') {
+    context.bytecode.push(`${OpCode.KBIG} ${register}, ${node.value}`);
   } else if (typeof node.value === 'string') {
     context.bytecode.push(`${OpCode.KSTR} ${register}, "${node.value}"`);
   } else if (typeof node.value === 'boolean') {
-    console.log(node);
-    const priValue = node.value ? 1 : 0; // true -> 2, false -> 1
+    const priValue = node.value ? 1 : 0; // true -> 1, false -> 0
     context.bytecode.push(`${OpCode.KPRI} ${register}, ${priValue}`);
   } else if (node.value === null) {
     context.bytecode.push(`${OpCode.KNULL} ${register}`);
+  } else if (node.value === undefined) {
+    // Handle `undefined` as a special literal case
+    context.bytecode.push(`${OpCode.KNULL} ${register}`); // Assuming `undefined` can be treated like `null`
+  } else {
+    throw new Error(`Unsupported literal type: ${typeof node.value}`);
   }
-
-  // add the new register to the current scope
-  const currentScope = context.scopeStack[context.scopeStack.length - 1];
-  currentScope.set(register, register);
+  
   return register;
 }
 
+
 // Resolve an identifier by looking through scopes
 function resolveIdentifier(context, name) {
+  if (name === 'undefined') {
+    // Handle `undefined` directly
+    const register = newRegister(context);
+    context.bytecode.push(`${OpCode.KNULL} ${register}`); // Treat undefined similar to null
+    return register;
+  }
+
   for (let i = context.scopeStack.length - 1; i >= 0; i--) {
     const scope = context.scopeStack[i];
     if (scope.has(name)) {
       return scope.get(name);
     }
   }
+
+  // If the identifier is not found, search in the global table
+  if (context.globalTable.has(name)) {
+    const globalEntry = context.globalTable.get(name);
+    if (typeof globalEntry === 'function' || typeof globalEntry === 'object') {
+      const register = newRegister(context);
+      context.bytecode.push(`${OpCode.GGET} ${register}, "${name}"`);
+      return register;
+    }
+  }
+
   throw new Error(`Identifier ${name} not found`);
 }
+
+
 
 // Function to compile a binary expression
 async function compileBinaryExpression(node, context) {
@@ -575,16 +658,16 @@ async function compileBinaryExpression(node, context) {
       context.bytecode.push(`${OpCode.URSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
       break;
     case '<':
-      context.bytecode.push(`${OpCode.ISLT} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISLT} ${leftReg}, ${rightReg}`);
       break;
     case '>':
-      context.bytecode.push(`${OpCode.ISGT} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISGT} ${leftReg}, ${rightReg}`);
       break;
     case '<=':
-      context.bytecode.push(`${OpCode.ISLE} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISLE} ${leftReg}, ${rightReg}`);
       break;
     case '>=':
-      context.bytecode.push(`${OpCode.ISGE} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push(`${OpCode.ISGE} ${leftReg}, ${rightReg}`);
       break;
     case '===':
       context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`); // voir si c'est bien ISEQV
@@ -611,6 +694,9 @@ async function compileBinaryExpression(node, context) {
 }
 
 async function compileAssignmentExpression(node, context) {
+
+  console.log("type", node.left.type)
+
   if (node.left.type === 'Identifier') {
     const destReg = resolveIdentifier(context, node.left.name);
 
@@ -618,13 +704,16 @@ async function compileAssignmentExpression(node, context) {
     if (node.right.type === 'Literal') {
       const literalReg = compileLiteral(node.right, context);
       context.bytecode.push(`${OpCode.MOV} ${destReg}, ${literalReg}`);
+      //freeRegister(context, literalReg); // Free the literal register after use
     } else if (node.right.type === 'Identifier') {
       const sourceReg = resolveIdentifier(context, node.right.name);
       context.bytecode.push(`${OpCode.MOV} ${destReg}, ${sourceReg}`);
 
     } else {
+      
       const valueReg = await compileExpression(node.right, context);
       context.bytecode.push(`${OpCode.MOV} ${destReg}, ${valueReg}`);
+      //freeRegister(context, valueReg); // Free the value register after use
     }
 
     return destReg;
@@ -664,7 +753,9 @@ async function compileMemberAssignmentExpression(node, context) {
 
 // Function to compile an if statement
 async function compileIfStatement(node, context) {
+
   const testReg = await compileExpression(node.test, context);
+  
   const consequent = node.consequent;
   const alternate = node.alternate;
 
@@ -749,9 +840,21 @@ async function compileFunctionDeclaration(node, context) {
 }
 
 // Update the compileCallExpression function to handle function calls
+// Function to compile a call expression
+// Function to compile a call expression
 async function compileCallExpression(node, context) {
-  const funcName = node.callee.name;
-  const funcRegister = resolveIdentifier(context, funcName);
+  let funcRegister;
+
+  if (node.callee.type === 'MemberExpression') {
+    // Handle member expressions, e.g., console.log
+    funcRegister = await compileMemberExpression(node.callee, context);
+  } else {
+    // Handle normal identifiers
+    if (node.callee.name === 'undefined') {
+      throw new Error(`Attempted to call undefined as a function`);
+    }
+    funcRegister = resolveIdentifier(context, node.callee.name);
+  }
 
   // Prepare arguments
   const args = [];
@@ -759,14 +862,23 @@ async function compileCallExpression(node, context) {
     args.push(await compileExpression(arg, context));
   }
 
-  // Call the function
-  context.bytecode.push(`${OpCode.CALL} ${funcRegister}, ${args.join(', ')}`);
+  // Number of arguments
+  const numArgs = args.length;
+
+  // Emit the CALL instruction with the number of return values and arguments
+  const numReturnValues = 1; // Assuming one return value for simplicity
+  const returnRegister = newRegister(context);
+
+  context.bytecode.push(`${OpCode.CALL} ${funcRegister}, ${numArgs}, ${returnRegister}`);
+
+  args.forEach(argReg => freeRegister(context, argReg));
+
+  return returnRegister;
 }
+
 
 // Example usage
 (async () => {
-
-
 
   // loop in test folder
 
@@ -774,10 +886,13 @@ async function compileCallExpression(node, context) {
   const files = fs.readdirSync(testFolder);
 
   files.forEach(async (file) => {
-    const data = fs.readFileSync(testFolder + file, "utf8");
-    const bytecode = await compileProgram(data);
     
-    console.log(`Bytecode for ${file}:`);
-    console.log(bytecode.join('\n'));
+    if (file === "registery.js") {
+      const data = fs.readFileSync(testFolder + file, "utf8");
+      const bytecode = await compileProgram(data);
+    
+      console.log(`Bytecode for ${file}:`);
+      console.log(bytecode.join('\n'));
+    }
   });
 })();
