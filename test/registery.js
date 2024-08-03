@@ -1,4 +1,11 @@
-const fruits = ["Bananas", "Oranges", "Apples", "Mangos"];
+{
+    // Create an Object
+    const person = {
+        firstName: "John",
+        lastName: "Doe",
+        age: 50
+    };
 
-// Destructuring
-let [fruit1, fruit2] = fruits;
+    // Destructuring
+    let { firstName, lastName, country = "US" } = person;
+}
