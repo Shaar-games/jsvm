@@ -1,2 +1,4 @@
+const fruits = ["Bananas", "Oranges", "Apples", "Mangos"];
 
-console.log = 0
+// Destructuring
+let [fruit1, fruit2] = fruits;
