@@ -70,7 +70,7 @@ function newRegister(context) {
 }
 
 function freeRegister(context, register) {
-  context.bytecode.push(`${OpCode.GC} ${register}`);
+  //context.bytecode.push(`${OpCode.GC} ${register}`);
   context.freeRegisters.push(register);
 }
 
@@ -320,14 +320,91 @@ function compileBreakStatement(node, context) {
   context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
 }
 
+async function compileObjectPattern(declaration, context) {
+  // Compile the right-hand side expression (the object to destructure)
+  const sourceReg = await compileExpression(declaration.init, context);
+
+  // Iterate over each property in the object pattern
+  for (const property of declaration.id.properties) {
+    const key = property.key.name;
+    const valueReg = newRegister(context);
+
+    // Check if the property key is computed
+    if (property.computed) {
+      throw new Error("Computed properties in object pattern not supported.");
+    }
+
+    // Generate bytecode to extract the property value from the object
+    context.bytecode.push(`${OpCode.OGETV} ${valueReg}, ${sourceReg}, "${key}"`);
+
+    // Assign the extracted value to the variable name in the pattern
+    if (property.value.type === 'Identifier') {
+      const varName = property.value.name;
+      const varReg = getRegister(context, varName);
+      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+    } else {
+      throw new Error(`Unsupported pattern element: ${property.value.type}`);
+    }
+
+    // Free the value register after use
+    freeRegister(context, valueReg);
+  }
+
+  // Free the source register after destructuring
+  freeRegister(context, sourceReg);
+}
+
+// Function to compile array pattern (destructuring assignment)
+async function compileArrayPattern(declaration, context) {
+  // Compile the right-hand side expression (the array to destructure)
+  const sourceReg = await compileExpression(declaration.init, context);
+
+  // Iterate over each element in the array pattern
+  for (let index = 0; index < declaration.id.elements.length; index++) {
+    const element = declaration.id.elements[index];
+    const valueReg = newRegister(context);
+
+    // Generate bytecode to extract the element from the array
+    context.bytecode.push(`${OpCode.AGETV} ${valueReg}, ${sourceReg}, ${index}`);
+
+    // Assign the extracted value to the variable name in the pattern
+    if (element.type === 'Identifier') {
+      const varName = element.name;
+      const varReg = getRegister(context, varName);
+      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+    } else {
+      throw new Error(`Unsupported pattern element: ${element.type}`);
+    }
+
+    // Free the value register after use
+    freeRegister(context, valueReg);
+  }
+
+  // Free the source register after destructuring
+  freeRegister(context, sourceReg);
+}
+
 // Function to compile a variable declaration
 async function compileVariableDeclaration(node, context) {
   for (const declaration of node.declarations) {
-    const name = declaration.id.name;
-    const destReg = getRegister(context, name);
-    const value = await compileExpression(declaration.init, context);
-    context.bytecode.push(`${OpCode.MOV} ${destReg}, ${value}`);
-    freeRegister(context, value);
+    
+    if (declaration.id.type === 'ObjectPattern') {
+      // Handle object destructuring
+      await compileObjectPattern(declaration, context);
+    } else if (declaration.id.type === 'ArrayPattern') {
+      // Handle array destructuring
+      await compileArrayPattern(declaration, context);
+    } else if (declaration.id.type === 'Identifier') {
+      console.log("declaration", declaration.id.type)
+      // Regular variable declaration
+      const name = declaration.id.name;
+      const value = await compileExpression(declaration.init, context);
+      const destReg = getRegister(context, name);
+      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${value}`);
+      freeRegister(context, value);
+    }else{
+      throw new Error(`Unsupported declaration type: ${declaration.id.type}`);
+    }
   }
 }
 
@@ -485,7 +562,7 @@ async function compileUnaryExpression(node, context) {
       const nullReg = newRegister(context);
       context.bytecode.push(`${OpCode.KNULL} ${nullReg}`);
       context.bytecode.push(`${OpCode.MOV} ${varReg}, ${nullReg}`);
-      context.bytecode.push(`${OpCode.GC} ${varReg}`);
+      //context.bytecode.push(`${OpCode.GC} ${varReg}`);
 
       // Set the result register to indicate success
       context.bytecode.push(`${OpCode.KPRI} ${resultReg}, 1`);
@@ -810,8 +887,15 @@ async function compileWhileStatement(node, context) {
 
 // Function to compile a function declaration
 async function compileFunctionDeclaration(node, context) {
-  const functionName = node.id.name;
-  const functionRegister = getRegister(context, functionName);
+  const functionName = node.id.name; // Get the name of the function
+  const functionRegister = getRegister(context, functionName); // Get a register for the function
+
+  // Generate unique labels for the start and end of the function
+  const functionStartLabel = `FUNC_START_${functionName}`;
+  const functionEndLabel = `FUNC_END_${functionName}`;
+
+  // Emit label for the start of the function
+  context.bytecode.push(`${functionStartLabel}:`);
 
   // Emit FNEW instruction to create a new function
   context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
@@ -820,23 +904,30 @@ async function compileFunctionDeclaration(node, context) {
   const functionScope = new Map();
   context.scopeStack.push(functionScope);
 
-  // Push function parameters into the function scope
+  // Assign function parameters to registers
   let paramCount = 0;
-
-  node.params.forEach(param => {
+  for (const param of node.params) {
     const paramName = param.name;
     const paramRegister = getRegister(context, paramName);
     context.bytecode.push(`${OpCode.MOV} ${paramRegister}, ${paramCount++}`);
-  });
+  }
 
   // Compile the body of the function
   await compileBlockStatement(node.body, context);
 
   // Add RET instruction to return from the function
-  context.bytecode.push(`${OpCode.RET} 0`);
+  //context.bytecode.push(`${OpCode.RET} 0`);
+
+  // Emit label for the end of the function
+  context.bytecode.push(`${functionEndLabel}:`);
 
   // Exit the function scope
   context.scopeStack.pop();
+
+  // Optionally, store function information in the context for logging or debugging
+  context.functions.set(functionName, { register: functionRegister, startLabel: functionStartLabel, endLabel: functionEndLabel });
+
+  console.log(`Function ${functionName} compiled with labels: ${functionStartLabel}, ${functionEndLabel}`);
 }
 
 // Update the compileCallExpression function to handle function calls
@@ -880,13 +971,10 @@ async function compileCallExpression(node, context) {
 // Example usage
 (async () => {
 
-  // loop in test folder
-
   const testFolder = "./test/";
   const files = fs.readdirSync(testFolder);
 
   files.forEach(async (file) => {
-    
     if (file === "registery.js") {
       const data = fs.readFileSync(testFolder + file, "utf8");
       const bytecode = await compileProgram(data);
