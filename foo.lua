@@ -1,9 +1,10 @@
 
-local g = 1
-local f = 1
-
-if g == f then
-    local a = 1
-elseif g ~= 2 then
-    local b = 3
+local function foo()
+    print("foo")
+    local function f ()
+        print("f")
+    end
 end
+
+
+--local a , b , c , d = foo(1,false,3,4,5)
