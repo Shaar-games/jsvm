@@ -1,11 +1,17 @@
 {
-    // Create an Object
-    const person = {
-        firstName: "John",
-        lastName: "Doe",
-        age: 50
-    };
+    let test = function() {
 
-    // Destructuring
-    let { firstName, lastName, country = "US" } = person;
+        let a = 1;
+        let b = a;
+
+        let t = function () {
+            console.log('test');
+        }
+
+        let c = t;
+    }
+
+    test();
+
+    let a = 1;
 }

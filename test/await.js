@@ -1,0 +1,1 @@
+let a = await fetch("https://developer.mozilla.org/en-US")

@@ -1,1 +1,1 @@
-//const output = void true;
+const output = void true;

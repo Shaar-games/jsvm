@@ -91,5 +91,5 @@
     let lastName = "Doe";
 
     // Destructing
-    [firstName, lastName] = [lastName, firstName];
+    [firstName, lastName] = [lastName, firstName]; // ne fonctionne pas
 }
