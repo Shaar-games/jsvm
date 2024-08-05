@@ -273,7 +273,7 @@ async function compileObjectPattern(declaration, context) {
 
   // Iterate over each property in the object pattern
   for (const property of declaration.id.properties) {
-    
+
     const key = property.key.name;
     const valueReg = newRegister(context);
 
@@ -290,7 +290,7 @@ async function compileObjectPattern(declaration, context) {
     }
 
     // Generate bytecode to extract the property value from the object
-    
+
 
     // Assign the extracted value to the variable name in the pattern
     if (property.value.type === 'Identifier') {
@@ -665,7 +665,30 @@ async function compileUnaryExpression(node, context) {
 
   if (node.operator === "delete") {
     if (node.argument.type === "MemberExpression") {
-      throw new Error(`Unsupported argument for 'delete': ${node.argument.type}`);
+      // For deleting a property, set it to null and perform GC
+      const objReg = await compileExpression(node.argument.object, context);
+      let propReg;
+
+      if (node.argument.computed) {
+        propReg = await compileExpression(node.argument.property, context);
+      }
+      else {
+        propReg = newRegister(context);
+        context.bytecode.push(`${OpCode.KSTR} ${propReg}, "${node.argument.property.name}"`);
+      }
+
+      const nullReg = newRegister(context);
+      context.bytecode.push(`${OpCode.KNULL} ${nullReg}`);
+      context.bytecode.push(`${OpCode.OSETV} ${objReg}, ${propReg}, ${nullReg}`);
+
+      freeRegister(context, nullReg);
+      freeRegister(context, propReg);
+
+      // Set the result register to indicate success
+      context.bytecode.push(`${OpCode.KPRI} ${resultReg}, 1`);
+
+      return resultReg;
+
     } else if (node.argument.type === "Identifier") {
       // For deleting a variable, set it to null and perform GC
       const varReg = resolveIdentifier(context, node.argument.name);
@@ -743,7 +766,73 @@ async function compileAwaitExpression(node, context) {
 }
 
 async function compileFunctionExpression(node, context) {
-  
+  // Create a new context for the function to manage its scope
+  const functionContext = {
+    bytecode: {
+      length: 0,
+      array: [],
+      push: function (line) {
+        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.length++;
+      },
+      join: function (separator) {
+        return this.array.join(separator);
+      },
+    },
+    scopeStack: [new Map()],
+    nextRegister: 0,
+    labelCounter: 0,
+    functions: new Map(),
+    loopLabels: [],
+    freeRegisters: [],
+    functionBytecodes: context.functionBytecodes,
+  };
+
+  // Create a new register for the function itself
+  const functionRegister = newRegister(context);
+
+  // Emit bytecode to create a new function
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+
+  // Register the function in the current context
+  const functionName = node.id ? node.id.name : `anonymous_${context.labelCounter}`;
+  context.functions.set(functionName, {
+    name: functionName,
+    startLine: node.loc.start.line,
+    endLine: node.loc.end.line,
+    bytecode: functionContext.bytecode
+  });
+
+  // Add function parameters to the function's scope
+  for (let i = 0; i < node.params.length; i++) {
+    const param = node.params[i];
+    if (param.type === 'Identifier') {
+      const paramRegister = newRegister(functionContext);
+      functionContext.scopeStack[0].set(param.name, paramRegister);
+      // Assuming function arguments are passed in sequential registers
+      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+    } else {
+      throw new Error(`Unsupported parameter type: ${param.type}`);
+    }
+  }
+
+  // Compile the function body
+  await compileBlockStatement(node.body, functionContext);
+
+  // Emit return opcode if the function doesn't have an explicit return
+  if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
+    functionContext.bytecode.push(`${OpCode.RET}`);
+  }
+
+  // Store the function bytecode in the main context
+  context.functionBytecodes.push({
+    name: functionName,
+    startLine: node.loc.start.line,
+    endLine: node.loc.end.line,
+    bytecode: functionContext.bytecode
+  });
+
+  return functionRegister;
 }
 
 
@@ -776,6 +865,8 @@ async function compileExpression(node, context) {
       return await compileAwaitExpression(node, context);
     case "FunctionExpression":
       return await compileFunctionExpression(node, context);
+    case "ArrowFunctionExpression":
+      return await compileArrowFunctionExpression(node, context);
     default:
       console.log(require("util").inspect(node, false, null, true /* enable colors */));
       throw new Error(`Unsupported expression type: ${node.type}`);
@@ -825,7 +916,7 @@ function resolveIdentifier(context, name) {
   }
 
   const register = newRegister(context);
-  
+
   context.bytecode.push(`${OpCode.GGET} ${register}, "${name}"`);
   return register;
 
@@ -1099,7 +1190,141 @@ async function compileWhileStatement(node, context) {
 
 // Function to compile a function declaration
 async function compileFunctionDeclaration(node, context) {
+  // Create a new context for the function to manage its scope
+  const functionContext = {
+    bytecode: {
+      length: 0,
+      array: [],
+      push: function (line) {
+        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.length++;
+      },
+      join: function (separator) {
+        return this.array.join(separator);
+      },
+    },
+    scopeStack: [new Map()],
+    nextRegister: 0,
+    labelCounter: 0,
+    functions: new Map(),
+    loopLabels: [],
+    freeRegisters: [],
+    functionBytecodes: context.functionBytecodes,
+  };
 
+  // Assign a new register for the function name in the current scope
+  const functionName = node.id.name;
+  const functionRegister = getRegister(context, functionName);
+
+  // Emit bytecode to create a new function
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+
+  // Register the function in the main context
+  context.functions.set(functionName, {
+    name: functionName,
+    startLine: node.loc.start.line,
+    endLine: node.loc.end.line,
+    bytecode: functionContext.bytecode,
+  });
+
+  // Add function parameters to the function's scope
+  for (let i = 0; i < node.params.length; i++) {
+    const param = node.params[i];
+    if (param.type === 'Identifier') {
+      const paramRegister = newRegister(functionContext);
+      functionContext.scopeStack[0].set(param.name, paramRegister);
+      // Assuming function arguments are passed in sequential registers
+      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+    } else {
+      throw new Error(`Unsupported parameter type: ${param.type}`);
+    }
+  }
+
+  // Compile the function body
+  await compileBlockStatement(node.body, functionContext);
+
+  // Emit return opcode if the function doesn't have an explicit return
+  if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
+    functionContext.bytecode.push(`${OpCode.RET}`);
+  }
+
+  // Store the function bytecode in the main context
+  context.functionBytecodes.push({
+    name: functionName,
+    startLine: node.loc.start.line,
+    endLine: node.loc.end.line,
+    bytecode: functionContext.bytecode,
+  });
+
+  return functionRegister;
+}
+
+async function compileArrowFunctionExpression(node, context) {
+  // Create a new context for the arrow function to manage its scope
+  const functionContext = {
+    bytecode: {
+      length: 0,
+      array: [],
+      push: function (line) {
+        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.length++;
+      },
+      join: function (separator) {
+        return this.array.join(separator);
+      },
+    },
+    scopeStack: [new Map()],
+    nextRegister: 0,
+    labelCounter: 0,
+    functions: new Map(),
+    loopLabels: [],
+    freeRegisters: [],
+    functionBytecodes: context.functionBytecodes,
+  };
+
+  // Create a new register for the function
+  const functionRegister = newRegister(context);
+
+  // Emit bytecode to create a new function
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+
+  // Add function parameters to the function's scope
+  for (let i = 0; i < node.params.length; i++) {
+    const param = node.params[i];
+    if (param.type === 'Identifier') {
+      const paramRegister = newRegister(functionContext);
+      functionContext.scopeStack[0].set(param.name, paramRegister);
+      // Assuming function arguments are passed in sequential registers
+      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+    } else {
+      throw new Error(`Unsupported parameter type: ${param.type}`);
+    }
+  }
+
+  // Handle concise body single expression arrow functions
+  if (node.body.type !== 'BlockStatement') {
+    const returnValue = await compileExpression(node.body, functionContext);
+    functionContext.bytecode.push(`${OpCode.RET} ${returnValue}`);
+    freeRegister(functionContext, returnValue);
+  } else {
+    // Compile the function body if it's a block statement
+    await compileBlockStatement(node.body, functionContext);
+
+    // Emit return opcode if the function doesn't have an explicit return
+    if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
+      functionContext.bytecode.push(`${OpCode.RET}`);
+    }
+  }
+
+  // Store the function bytecode in the main context
+  context.functionBytecodes.push({
+    name: `arrow_function_${context.labelCounter}`,
+    startLine: node.loc.start.line,
+    endLine: node.loc.end.line,
+    bytecode: functionContext.bytecode,
+  });
+
+  return functionRegister;
 }
 
 // Update the compileCallExpression function to handle function calls
@@ -1138,7 +1363,7 @@ async function compileCallExpression(node, context) {
   const files = fs.readdirSync(testFolder);
 
   files.forEach(async (file) => {
-    if (file === "registery.js") {
+    if (file === "script.js") {
       const data = fs.readFileSync(testFolder + file, "utf8");
       const bytecode = await compileProgram(data);
 
