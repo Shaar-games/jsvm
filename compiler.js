@@ -56,10 +56,11 @@ const OpCode = {
   NOT: 'NOT',
   UNM: 'UNM',
   XOR: 'XOR',
-  GGET: 'GGET',
-  GSET: 'GSET',
+  GGETV: 'GGET',
+  GSETV: 'GSET',
   AWAIT: 'AWAIT',
   TYPEOF: 'TYPEOF',
+  EXIT: 'EXIT',
 };
 
 function newRegister(context) {
@@ -319,6 +320,8 @@ async function compileArrayPattern(declaration, context) {
     if (element === null) continue; // Passer les trous dans le tableau
 
     const valueReg = newRegister(context);
+    const indexReg = newRegister(context);
+    context.bytecode.push([OpCode.LOAD, types.Number, indexReg, index]);
     context.bytecode.push([OpCode.AGETV, valueReg, sourceReg, index]);
 
     // Gérer les éléments avec des valeurs par défaut
@@ -366,6 +369,7 @@ async function compileArrayPattern(declaration, context) {
 
     // Libère le registre de la valeur après utilisation
     freeRegister(context, valueReg);
+    freeRegister(context, indexReg);
   }
 
   // Gérer le RestElement s'il existe
@@ -449,8 +453,12 @@ async function compileArrayExpression(node, context) {
   for (let i = 0; i < node.elements.length; i++) {
     const element = node.elements[i];
     const elementRegister = await compileExpression(element, context);
-    context.bytecode.push([OpCode.ASETV, register, i, elementRegister]);
+    // create a new register to store the index
+    const iReg = newRegister(context);
+    context.bytecode.push([OpCode.LOAD, types.Number, iReg, i]);
+    context.bytecode.push([OpCode.ASETV, register, iReg, elementRegister]);
     // Libère le registre de l'élément après utilisation
+    freeRegister(context, iReg);
     freeRegister(context, elementRegister);
   }
 
@@ -816,9 +824,30 @@ function resolveIdentifier(context, name) {
     }
   }
 
-  const register = newRegister(context);
+  // if the name start with $VM$ and end with $, it's a compiler instruction
 
-  context.bytecode.push([OpCode.GGET, register, `"${name}"`]);
+  console.log("name", name);
+  if (name.startsWith("$VM$") && name.endsWith("$")) {
+
+    const instruction = name.slice(4, name.length - 1);
+
+    console.log("instruction", instruction);
+    switch (instruction) {
+      case "EXIT":
+        context.bytecode.push([OpCode.EXIT]);
+        break;
+      default:
+        throw new Error(`Unsupported instruction: ${instruction}`);
+    }
+
+    return null;
+  }
+
+  const register = newRegister(context);
+  const indexReg = newRegister(context);
+
+  context.bytecode.push([OpCode.LOAD, types.String, indexReg, `"${name}"`]);
+  context.bytecode.push([OpCode.GGETV, register, indexReg]);
   return register;
 
   throw new Error(`Identifier ${name} not found`);
