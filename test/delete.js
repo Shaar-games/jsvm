@@ -3,4 +3,4 @@ const Employee = {
     lastname: 'Sanchez',
 };
 
-//delete Employee.firstname;
+delete Employee.firstname;
