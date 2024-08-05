@@ -98,15 +98,19 @@ async function compileProgram(code) {
     functions: new Map(),
     loopLabels: [],
     freeRegisters: [],
-    functionBytecodes: [], // Store function bytecodes separately
   };
 
   await compileBlockStatement(ast, context);
 
+  console.log(context.functions);
+
   // Append function bytecodes to the main bytecode
-  context.functionBytecodes.forEach(func => {
-    context.bytecode.push(`-- BYTECODE -- ${func.name} :${func.startLine}-${func.endLine}`);
-    context.bytecode.array = context.bytecode.array.concat(func.bytecode.array);
+  context.functions.forEach(func => {
+    //context.bytecode.push(`-- BYTECODE -- ${func.name} :${func.startLine}-${func.endLine}`);
+    console.log(func.name);
+    func.bytecode.array.forEach(line => {
+      console.log(line);
+    });
   });
 
   return context.bytecode;
@@ -121,6 +125,8 @@ function getRegister(context, name) {
     const register = newRegister(context);
     currentScope.set(name, register);
   }
+
+  // search in function context
   return currentScope.get(name);
 }
 
@@ -779,23 +785,25 @@ async function compileFunctionExpression(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [new Map()],
+    scopeStack: [...context.scopeStack , new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
     loopLabels: [],
     freeRegisters: [],
-    functionBytecodes: context.functionBytecodes,
   };
 
   // Create a new register for the function itself
   const functionRegister = newRegister(context);
 
   // Emit bytecode to create a new function
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+
+  // set 
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
 
   // Register the function in the current context
   const functionName = node.id ? node.id.name : `anonymous_${context.labelCounter}`;
+
   context.functions.set(functionName, {
     name: functionName,
     startLine: node.loc.start.line,
@@ -825,12 +833,13 @@ async function compileFunctionExpression(node, context) {
   }
 
   // Store the function bytecode in the main context
-  context.functionBytecodes.push({
-    name: functionName,
-    startLine: node.loc.start.line,
-    endLine: node.loc.end.line,
-    bytecode: functionContext.bytecode
-  });
+
+  //context.functionBytecodes.push({
+  //  name: functionName,
+  //  startLine: node.loc.start.line,
+  //  endLine: node.loc.end.line,
+  //  bytecode: functionContext.bytecode
+  //});
 
   return functionRegister;
 }
@@ -1203,13 +1212,12 @@ async function compileFunctionDeclaration(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [new Map()],
+    scopeStack: [...context.scopeStack , new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
     loopLabels: [],
     freeRegisters: [],
-    functionBytecodes: context.functionBytecodes,
   };
 
   // Assign a new register for the function name in the current scope
@@ -1217,7 +1225,7 @@ async function compileFunctionDeclaration(node, context) {
   const functionRegister = getRegister(context, functionName);
 
   // Emit bytecode to create a new function
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
 
   // Register the function in the main context
   context.functions.set(functionName, {
@@ -1248,14 +1256,6 @@ async function compileFunctionDeclaration(node, context) {
     functionContext.bytecode.push(`${OpCode.RET}`);
   }
 
-  // Store the function bytecode in the main context
-  context.functionBytecodes.push({
-    name: functionName,
-    startLine: node.loc.start.line,
-    endLine: node.loc.end.line,
-    bytecode: functionContext.bytecode,
-  });
-
   return functionRegister;
 }
 
@@ -1273,20 +1273,19 @@ async function compileArrowFunctionExpression(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [new Map()],
+    scopeStack: [...context.scopeStack , new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
     loopLabels: [],
     freeRegisters: [],
-    functionBytecodes: context.functionBytecodes,
   };
 
   // Create a new register for the function
   const functionRegister = newRegister(context);
 
   // Emit bytecode to create a new function
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister}`);
+  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
 
   // Add function parameters to the function's scope
   for (let i = 0; i < node.params.length; i++) {
@@ -1315,14 +1314,6 @@ async function compileArrowFunctionExpression(node, context) {
       functionContext.bytecode.push(`${OpCode.RET}`);
     }
   }
-
-  // Store the function bytecode in the main context
-  context.functionBytecodes.push({
-    name: `arrow_function_${context.labelCounter}`,
-    startLine: node.loc.start.line,
-    endLine: node.loc.end.line,
-    bytecode: functionContext.bytecode,
-  });
 
   return functionRegister;
 }
