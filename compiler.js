@@ -11,7 +11,7 @@ const types = {
   "Null": 5,
   "Symbol": 6,
   "Object": 7,
-}
+};
 
 const OpCode = {
   ADDVN: 'ADDVN',
@@ -22,13 +22,7 @@ const OpCode = {
   MULVV: 'MULVV',
   DIVVV: 'DIVVV',
   MOV: 'MOV',
-  KNUM: 'KNUM',
   LOAD: 'LOAD',
-  KBIG: 'KBIG',
-  KSTR: 'KSTR',
-  KPRI: 'KPRI',
-  KNULL: 'KNULL',
-  KUNDEF: 'KUNDEF',
   ISLT: 'ISLT',
   ISGE: 'ISGE',
   ISLE: 'ISLE',
@@ -69,24 +63,18 @@ const OpCode = {
 };
 
 function newRegister(context) {
-
-  // print the used registers
-
-  //console.log(context.freeRegisters);
-
   if (context.freeRegisters.length > 0) {
     // Reuse a register from the free pool
     return context.freeRegisters.pop();
   } else {
     // Allocate a new register
     context.nextRegister = context.nextRegister + 1;
-    const r = `R${context.nextRegister}`
+    const r = `R${context.nextRegister}`;
     return r;
   }
 }
 
 function freeRegister(context, register) {
-  //context.bytecode.push(`${OpCode.GC} ${register}`);
   context.freeRegisters.push(register);
 }
 
@@ -98,11 +86,11 @@ async function compileProgram(code) {
       length: 0,
       array: [],
       push: function (line) {
-        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.array.push(line);
         this.length++;
       },
       join: function (separator) {
-        return this.array.join(separator);
+        return this.array.map(line => line.join(' ')).join(separator);
       },
     },
     scopeStack: [new Map()],
@@ -119,10 +107,9 @@ async function compileProgram(code) {
 
   // Append function bytecodes to the main bytecode
   context.functions.forEach(func => {
-    //context.bytecode.push(`-- BYTECODE -- ${func.name} :${func.startLine}-${func.endLine}`);
-    console.log(func.name);
+    console.log("---", "BYTECODE", "---", func.name);
     func.bytecode.array.forEach(line => {
-      console.log(line);
+      console.log(line.join(' '));
     });
   });
 
@@ -152,14 +139,10 @@ async function compileBlockStatement(node, context) {
     await compileStatement(statement, context);
   }
 
-  // Add GC instructions before exiting the current scope
-  //emitGCInstructions(context);
-
   // Exit the current scope
   context.scopeStack.pop();
 }
 
-// Function to compile a for statement
 // Function to compile a for statement
 async function compileForStatement(node, context) {
   const labelStart = `L${++context.labelCounter}`;
@@ -174,13 +157,14 @@ async function compileForStatement(node, context) {
   context.loopLabels.push({ start: labelStart, end: labelEnd });
 
   // Label for the beginning of the loop
-  context.bytecode.push(`${labelStart}:`);
+  context.bytecode.push([labelStart + ':']);
 
   // Compile test condition
   if (node.test) {
     const testReg = await compileExpression(node.test, context);
     // If the test fails, jump to the end
-    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+    context.bytecode.push([OpCode.JMP, labelEnd]);
+    freeRegister(context, testReg);
   }
 
   // Compile the loop body
@@ -192,10 +176,10 @@ async function compileForStatement(node, context) {
   }
 
   // Jump back to the start of the loop
-  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+  context.bytecode.push([OpCode.JMP, labelStart]);
 
   // Label for the end of the loop
-  context.bytecode.push(`${labelEnd}:`);
+  context.bytecode.push([labelEnd + ':']);
 
   // Pop the current loop's labels off the loopLabels stack
   context.loopLabels.pop();
@@ -205,17 +189,9 @@ async function compileForStatement(node, context) {
 function emitGCInstructions(context) {
   const currentScope = context.scopeStack[context.scopeStack.length - 1];
   currentScope.forEach(register => {
-    //context.bytecode.push(`${OpCode.GC} ${register}`);
-    // check if the register is in the free pool
     if (!context.freeRegisters.includes(register)) {
-      // Remove the register from the free pool
-
-      //const index = context.freeRegisters.indexOf(register);
-      //context.freeRegisters.splice(index, 1);
-
       freeRegister(context, register); // Mark the register as reusable
     }
-
   });
 }
 
@@ -233,7 +209,7 @@ function compileContinueStatement(node, context) {
   const labelStart = context.loopLabels[context.loopLabels.length - 1].start;
 
   // Emit jump to the start of the loop
-  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+  context.bytecode.push([OpCode.JMP, labelStart]);
 }
 
 // Extend the compileStatement function to handle ContinueStatement
@@ -247,7 +223,7 @@ async function compileStatement(node, context) {
       break;
     case 'ReturnStatement':
       const returnValue = await compileExpression(node.argument, context);
-      context.bytecode.push(`${OpCode.RET} ${returnValue}`);
+      context.bytecode.push([OpCode.RET, returnValue]);
       break;
     case 'IfStatement':
       await compileIfStatement(node, context);
@@ -283,7 +259,7 @@ async function compileStatement(node, context) {
 // Function to compile a break statement
 function compileBreakStatement(node, context) {
   const labelEnd = context.loopLabels[context.loopLabels.length - 1].end;
-  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  context.bytecode.push([OpCode.JMP, labelEnd]);
 }
 
 async function compileObjectPattern(declaration, context) {
@@ -292,30 +268,24 @@ async function compileObjectPattern(declaration, context) {
 
   // Iterate over each property in the object pattern
   for (const property of declaration.id.properties) {
-
     const key = property.key.name;
     const valueReg = newRegister(context);
 
     // Check if the property key is computed
-
-    console.log(property);
-
     if (property.computed) {
       const keyReg = await compileExpression(property.key, context);
-      context.bytecode.push(`${OpCode.OGETV} ${valueReg}, ${sourceReg}, ${keyReg}`);
+      context.bytecode.push([OpCode.OGETV, valueReg, sourceReg, keyReg]);
       freeRegister(context, keyReg);
     } else {
-      context.bytecode.push(`${OpCode.OGETV} ${valueReg}, ${sourceReg}, "${key}"`);
+      context.bytecode.push([OpCode.OGETV, valueReg, sourceReg, `"${key}"`]);
     }
 
     // Generate bytecode to extract the property value from the object
-
-
     // Assign the extracted value to the variable name in the pattern
     if (property.value.type === 'Identifier') {
       const varName = property.value.name;
       const varReg = getRegister(context, varName);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+      context.bytecode.push([OpCode.MOV, varReg, valueReg]);
     } else {
       throw new Error(`Unsupported pattern element: ${property.value.type}`);
     }
@@ -349,7 +319,7 @@ async function compileArrayPattern(declaration, context) {
     if (element === null) continue; // Passer les trous dans le tableau
 
     const valueReg = newRegister(context);
-    context.bytecode.push(`${OpCode.AGETV} ${valueReg}, ${sourceReg}, ${index}`);
+    context.bytecode.push([OpCode.AGETV, valueReg, sourceReg, index]);
 
     // Gérer les éléments avec des valeurs par défaut
     if (element.type === 'AssignmentPattern') {
@@ -367,19 +337,19 @@ async function compileArrayPattern(declaration, context) {
       const defaultReg = await compileExpression(right, context);
       const isUndefinedReg = newRegister(context);
 
-      context.bytecode.push(`${OpCode.ISNEV} ${isUndefinedReg}, ${valueReg}`);
-      context.bytecode.push(`${OpCode.JMP} L${context.labelCounter + 1}, ${isUndefinedReg}`);
+      context.bytecode.push([OpCode.ISNEV, isUndefinedReg, valueReg]);
+      context.bytecode.push([OpCode.JMP, `L${context.labelCounter + 1}`, isUndefinedReg]);
 
       // Assigne la valeur à la variable
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
-      context.bytecode.push(`JMP L${context.labelCounter + 2}`);
+      context.bytecode.push([OpCode.MOV, varReg, valueReg]);
+      context.bytecode.push([OpCode.JMP, `L${context.labelCounter + 2}`]);
 
       // Assigne la valeur par défaut
-      context.bytecode.push(`L${context.labelCounter + 1}:`);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${defaultReg}`);
+      context.bytecode.push([`L${context.labelCounter + 1}:`]);
+      context.bytecode.push([OpCode.MOV, varReg, defaultReg]);
 
       // Fin de cette assignation
-      context.bytecode.push(`L${context.labelCounter + 2}:`);
+      context.bytecode.push([`L${context.labelCounter + 2}:`]);
 
       // Incrémente le compteur de labels
       context.labelCounter += 2;
@@ -389,7 +359,7 @@ async function compileArrayPattern(declaration, context) {
     } else if (element.type === 'Identifier') {
       const varName = element.name;
       const varReg = getRegister(context, varName);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+      context.bytecode.push([OpCode.MOV, varReg, valueReg]);
     } else {
       throw new Error(`Unsupported pattern element in array: ${element.type}`);
     }
@@ -406,35 +376,35 @@ async function compileArrayPattern(declaration, context) {
 
     // Créer un nouveau tableau pour les éléments restants
     const restArrayReg = newRegister(context);
-    context.bytecode.push(`${OpCode.ANEW} ${restArrayReg}`);
+    context.bytecode.push([OpCode.ANEW, restArrayReg]);
 
     // Obtenir la longueur du tableau source
     const lengthReg = newRegister(context);
-    context.bytecode.push(`${OpCode.AGETV} ${lengthReg}, ${sourceReg}, "length"`);
+    context.bytecode.push([OpCode.AGETV, lengthReg, sourceReg, `"length"`]);
 
     // Itérer sur les éléments restants et les ajouter au tableau restant , starting from restIndex to lengthReg-1
 
     const indexReg = newRegister(context);
-    context.bytecode.push(`${OpCode.LOAD} ${types.Number}, ${indexReg}, ${restIndex}`);
-    context.bytecode.push(`L${context.labelCounter}:`);
+    context.bytecode.push([OpCode.LOAD, types.Number, indexReg, restIndex]);
+    context.bytecode.push([`L${context.labelCounter}:`]);
     const loopReg = newRegister(context);
-    context.bytecode.push(`${OpCode.SUBVV} ${loopReg}, ${lengthReg}, ${indexReg}`);
-    context.bytecode.push(`${OpCode.ISEQV} ${restVarReg}, ${indexReg}, ${lengthReg}`);
-    context.bytecode.push(`${OpCode.JMP} L${context.labelCounter + 1}, ${restVarReg}`);
+    context.bytecode.push([OpCode.SUBVV, loopReg, lengthReg, indexReg]);
+    context.bytecode.push([OpCode.ISEQV, restVarReg, indexReg, lengthReg]);
+    context.bytecode.push([OpCode.JMP, `L${context.labelCounter + 1}`, restVarReg]);
     // Get the value from the source array
     const valueReg = newRegister(context);
-    context.bytecode.push(`${OpCode.AGETV} ${valueReg}, ${sourceReg}, ${indexReg}`);
+    context.bytecode.push([OpCode.AGETV, valueReg, sourceReg, indexReg]);
     // Set the value in the destination array
-    context.bytecode.push(`${OpCode.ASETV} ${restArrayReg}, ${indexReg}, ${valueReg}`);
+    context.bytecode.push([OpCode.ASETV, restArrayReg, indexReg, valueReg]);
     // Increment the index
-    context.bytecode.push(`${OpCode.ADDVN} ${indexReg}, ${indexReg}, 1`);
+    context.bytecode.push([OpCode.ADDVN, indexReg, indexReg, 1]);
     // Jump back to the start of the loop
-    context.bytecode.push(`${OpCode.JMP} L${context.labelCounter}`);
+    context.bytecode.push([OpCode.JMP, `L${context.labelCounter}`]);
     // Label for the end of the loop
-    context.bytecode.push(`L${context.labelCounter + 1}:`);
+    context.bytecode.push([`L${context.labelCounter + 1}:`]);
 
     // Assign the rest array to the variable
-    context.bytecode.push(`${OpCode.MOV} ${restVarReg}, ${restArrayReg}`);
+    context.bytecode.push([OpCode.MOV, restVarReg, restArrayReg]);
 
     // Libère les registres après utilisation
     freeRegister(context, restArrayReg);
@@ -447,75 +417,9 @@ async function compileArrayPattern(declaration, context) {
   freeRegister(context, sourceReg);
 }
 
-
-// Function to compile object pattern (destructuring assignment)
-//async function compileObjectPattern(declaration, context) {
-//  // Compile the right-hand side expression (the object to destructure)
-//  const sourceReg = await compileExpression(declaration.init, context);
-//
-//  // Iterate over each property in the object pattern
-//  for (const property of declaration.id.properties) {
-//    const key = property.key.name;
-//    const valueReg = newRegister(context);
-//    console.log(property);
-//    // Generate bytecode to extract the property value from the object
-//    context.bytecode.push(`${OpCode.OGETV} ${valueReg}, ${sourceReg}, "${key}"`);
-//
-//    // Handle assignment patterns (default values)
-//    if (property.value.type === 'AssignmentPattern') {
-//      const left = property.value.left;
-//      const right = property.value.right;
-//
-//      if (left.type !== 'Identifier') {
-//        throw new Error(`Unsupported pattern element in object: ${left.type}`);
-//      }
-//
-//      const varName = left.name;
-//      const varReg = getRegister(context, varName);
-//
-//      // Emit code to check if the value is undefined and use the default
-//      const defaultReg = await compileExpression(right, context);
-//      const isUndefinedReg = newRegister(context);
-//
-//      context.bytecode.push(`${OpCode.ISNEV} ${isUndefinedReg}, ${valueReg}`);
-//      context.bytecode.push(`${OpCode.JMP} L${context.labelCounter + 1}, ${isUndefinedReg}`);
-//
-//      // Assign value to variable
-//      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
-//      context.bytecode.push(`JMP L${context.labelCounter + 2}`);
-//
-//      // Assign default value
-//      context.bytecode.push(`L${context.labelCounter + 1}:`);
-//      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${defaultReg}`);
-//
-//      // End of this assignment
-//      context.bytecode.push(`L${context.labelCounter + 2}:`);
-//
-//      // Increment label counter
-//      context.labelCounter += 2;
-//
-//      freeRegister(context, defaultReg);
-//      freeRegister(context, isUndefinedReg);
-//    } else if (property.value.type === 'Identifier') {
-//      const varName = property.value.name;
-//      const varReg = getRegister(context, varName);
-//      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
-//    } else {
-//      throw new Error(`Unsupported pattern element in object: ${property.value.type}`);
-//    }
-//
-//    // Free the value register after use
-//    freeRegister(context, valueReg);
-//  }
-//
-//  // Free the source register after destructuring
-//  freeRegister(context, sourceReg);
-//}
-
 // Function to compile a variable declaration
 async function compileVariableDeclaration(node, context) {
   for (const declaration of node.declarations) {
-
     if (declaration.id.type === 'ObjectPattern') {
       // Handle object destructuring
       await compileObjectPattern(declaration, context);
@@ -523,13 +427,11 @@ async function compileVariableDeclaration(node, context) {
       // Handle array destructuring
       await compileArrayPattern(declaration, context);
     } else if (declaration.id.type === 'Identifier') {
-      console.log("declaration", declaration.id.type)
-      console.log(node)
       // Regular variable declaration
       const name = declaration.id.name;
       const value = await compileExpression(declaration.init, context);
       const destReg = getRegister(context, name);
-      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${value}`);
+      context.bytecode.push([OpCode.MOV, destReg, value]);
       freeRegister(context, value);
     } else {
       throw new Error(`Unsupported declaration type: ${declaration.id.type}`);
@@ -539,16 +441,15 @@ async function compileVariableDeclaration(node, context) {
 
 // Function to compile an array expression
 async function compileArrayExpression(node, context) {
-  //throw new Error("Not implemented yet");
   const register = newRegister(context);
   // Crée un tableau vide et réserve un registre pour ce tableau
-  context.bytecode.push(`${OpCode.ANEW} ${register}`);
+  context.bytecode.push([OpCode.ANEW, register]);
 
   // Traite chaque élément du tableau et les assigne à des indices dans le tableau
   for (let i = 0; i < node.elements.length; i++) {
     const element = node.elements[i];
     const elementRegister = await compileExpression(element, context);
-    context.bytecode.push(`${OpCode.ASETV} ${register}, ${i}, ${elementRegister}`);
+    context.bytecode.push([OpCode.ASETV, register, i, elementRegister]);
     // Libère le registre de l'élément après utilisation
     freeRegister(context, elementRegister);
   }
@@ -575,10 +476,10 @@ async function compileUpdateExpression(node, context) {
 
   // Create a new register for the constant 1
   const oneReg = newRegister(context);
-  context.bytecode.push(`${OpCode.KNUM} ${oneReg}, 1`);
+  context.bytecode.push([OpCode.LOAD, types.Number, oneReg, 1]);
 
   // Apply the operation and update the register
-  context.bytecode.push(`${opcode} ${argReg}, ${argReg}, ${oneReg}`);
+  context.bytecode.push([opcode, argReg, argReg, oneReg]);
 
   // If the expression is a prefix operation, return the updated value
   if (node.prefix) {
@@ -586,7 +487,7 @@ async function compileUpdateExpression(node, context) {
   } else {
     // For postfix, create a temporary register to store the original value
     const tempReg = newRegister(context);
-    context.bytecode.push(`${OpCode.MOV} ${tempReg}, ${argReg}`);
+    context.bytecode.push([OpCode.MOV, tempReg, argReg]);
     return tempReg;
   }
 }
@@ -602,28 +503,27 @@ async function compileMemberExpression(node, context) {
   } else {
     // For non-computed properties, like console.log
     propertyRegister = newRegister(context);
-    context.bytecode.push(`${OpCode.KSTR} ${propertyRegister}, "${node.property.name}"`);
+    context.bytecode.push([OpCode.LOAD, types.String, propertyRegister, `"${node.property.name}"`]);
   }
 
   const resultRegister = newRegister(context);
 
   if (node.computed) {
     // If the property is an index, access it as an array
-    context.bytecode.push(`${OpCode.AGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
+    context.bytecode.push([OpCode.AGETV, resultRegister, objectRegister, propertyRegister]);
   } else {
     // Otherwise, access it as an object property
-    context.bytecode.push(`${OpCode.OGETV} ${resultRegister}, ${objectRegister}, ${propertyRegister}`);
+    context.bytecode.push([OpCode.OGETV, resultRegister, objectRegister, propertyRegister]);
   }
 
   return resultRegister;
 }
 
-
 async function compileObjectExpression(node, context) {
   const objectRegister = newRegister(context); // Create a new register for the object
 
   // Emit instruction to create a new object
-  context.bytecode.push(`${OpCode.ONEW} ${objectRegister}`); // Reuse ANEW opcode for object creation
+  context.bytecode.push([OpCode.ONEW, objectRegister]); // Reuse ANEW opcode for object creation
 
   for (const property of node.properties) {
     // Compile the property value
@@ -635,11 +535,11 @@ async function compileObjectExpression(node, context) {
       keyRegister = await compileExpression(property.key, context);
     } else {
       keyRegister = newRegister(context);
-      context.bytecode.push(`${OpCode.KSTR} ${keyRegister}, "${property.key.name || property.key.value}"`);
+      context.bytecode.push([OpCode.LOAD, types.String, keyRegister, `"${property.key.name || property.key.value}"`]);
     }
 
     // Assign the value to the object using the key
-    context.bytecode.push(`${OpCode.OGETV} ${objectRegister}, ${keyRegister}, ${valueRegister}`);
+    context.bytecode.push([OpCode.OGETV, objectRegister, keyRegister, valueRegister]);
   }
 
   // Add the new register to the current scope
@@ -656,25 +556,25 @@ async function compileLogicalExpression(node, context) {
 
   if (node.operator === '&&') {
     // For '&&', if the left is false, jump to the end
-    context.bytecode.push(`${OpCode.ISFC} ${leftReg}, ${labelRightEval}`);
-    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+    context.bytecode.push([OpCode.ISFC, leftReg, labelRightEval]);
+    context.bytecode.push([OpCode.JMP, labelEnd]);
   } else if (node.operator === '||') {
     // For '||', if the left is true, jump to the end
-    context.bytecode.push(`${OpCode.ISTC} ${leftReg}, ${labelRightEval}`);
-    context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+    context.bytecode.push([OpCode.ISTC, leftReg, labelRightEval]);
+    context.bytecode.push([OpCode.JMP, labelEnd]);
   } else {
     throw new Error(`Unsupported logical operator: ${node.operator}`);
   }
 
   // Label to evaluate the right operand
-  context.bytecode.push(`${labelRightEval}:`);
+  context.bytecode.push([labelRightEval + ':']);
   const rightReg = await compileExpression(node.right, context);
-  context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${rightReg}`);
-  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  context.bytecode.push([OpCode.MOV, resultReg, rightReg]);
+  context.bytecode.push([OpCode.JMP, labelEnd]);
 
   // Label for the end of the expression
-  context.bytecode.push(`${labelEnd}:`);
-  context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${leftReg}`);
+  context.bytecode.push([labelEnd + ':']);
+  context.bytecode.push([OpCode.MOV, resultReg, leftReg]);
 
   return resultReg;
 }
@@ -690,37 +590,29 @@ async function compileUnaryExpression(node, context) {
 
       if (node.argument.computed) {
         propReg = await compileExpression(node.argument.property, context);
-      }
-      else {
+      } else {
         propReg = newRegister(context);
-        context.bytecode.push(`${OpCode.KSTR} ${propReg}, "${node.argument.property.name}"`);
+        context.bytecode.push([OpCode.LOAD, types.String, propReg, `"${node.argument.property.name}"`]);
       }
 
       const nullReg = newRegister(context);
-      context.bytecode.push(`${OpCode.KNULL} ${nullReg}`);
-      context.bytecode.push(`${OpCode.OSETV} ${objReg}, ${propReg}, ${nullReg}`);
+      context.bytecode.push([OpCode.LOAD, types.Null, nullReg, 0]);
+      context.bytecode.push([OpCode.OSETV, objReg, propReg, nullReg]);
 
       freeRegister(context, nullReg);
       freeRegister(context, propReg);
 
       // Set the result register to indicate success
-      context.bytecode.push(`${OpCode.KPRI} ${resultReg}, 1`);
+      context.bytecode.push([OpCode.LOAD, types.Boolean, resultReg, 1]);
 
       return resultReg;
 
     } else if (node.argument.type === "Identifier") {
       // For deleting a variable, set it to null and perform GC
       const varReg = resolveIdentifier(context, node.argument.name);
-      const nullReg = newRegister(context);
-      context.bytecode.push(`${OpCode.KNULL} ${nullReg}`);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${nullReg}`);
-      //context.bytecode.push(`${OpCode.GC} ${varReg}`);
-
+      context.bytecode.push([OpCode.LOAD, types.Null, varReg, 0]);
       // Set the result register to indicate success
-      context.bytecode.push(`${OpCode.KPRI} ${resultReg}, 1`);
-
-      // Free the null register
-      //freeRegister(context, nullReg);
+      context.bytecode.push([OpCode.LOAD, types.Boolean, resultReg, 1]);
     } else {
       throw new Error(`Unsupported argument for 'delete': ${node.argument.type}`);
     }
@@ -732,42 +624,42 @@ async function compileUnaryExpression(node, context) {
     switch (node.operator) {
       case "-":
         // Unary minus: Set result to negative of the argument
-        context.bytecode.push(`${OpCode.UNM} ${resultReg}, ${argReg}`);
+        context.bytecode.push([OpCode.UNM, resultReg, argReg]);
         break;
       case "!":
         // Logical NOT: Set result to boolean not of the argument
-        context.bytecode.push(`${OpCode.NOT} ${resultReg}, ${argReg}`);
+        context.bytecode.push([OpCode.NOT, resultReg, argReg]);
         break;
       case "+":
         // Unary plus: Simply copy the argument to the result
-        context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${argReg}`);
+        context.bytecode.push([OpCode.MOV, resultReg, argReg]);
         break;
       case "~":
         // Bitwise NOT: Typically requires XOR with -1
         const allOnesReg = newRegister(context);
-        context.bytecode.push(`${OpCode.MOV} ${allOnesReg}, -1`);
-        context.bytecode.push(`${OpCode.XOR} ${resultReg}, ${argReg}, ${allOnesReg}`);
-        //freeRegister(context, allOnesReg);
+        context.bytecode.push([OpCode.MOV, allOnesReg, -1]);
+        context.bytecode.push([OpCode.XOR, resultReg, argReg, allOnesReg]);
         break;
       case "typeof":
         // Determine the type of the argument and set the result
         // create a new register to store the type
         const typeReg = newRegister(context);
-        context.bytecode.push(`${OpCode.TYPEOF} ${typeReg}, ${argReg}`);
-        context.bytecode.push(`${OpCode.MOV} ${resultReg}, ${typeReg}`);
+        context.bytecode.push([OpCode.TYPEOF, typeReg, argReg]);
+        context.bytecode.push([OpCode.MOV, resultReg, typeReg]);
         freeRegister(context, typeReg);
         break;
       case "void":
         // Set the result to undefined
-        context.bytecode.push(`${OpCode.KUNDEF} ${resultReg}`);
+        context.bytecode.push([OpCode.LOAD, types.Undefined, resultReg, 0]);
+        break;
       default:
         throw new Error(`Unsupported unary operator: ${node.operator}`);
     }
 
-    //freeRegister(context, argReg);
     return resultReg;
   }
 }
+
 async function compileAwaitExpression(node, context) {
   // Compile l'expression promise
   const promiseReg = await compileExpression(node.argument, context);
@@ -776,7 +668,7 @@ async function compileAwaitExpression(node, context) {
   const resultReg = newRegister(context);
 
   // Émettre le bytecode pour attendre la résolution de la promesse
-  context.bytecode.push(`${OpCode.AWAIT} ${resultReg}, ${promiseReg}`);
+  context.bytecode.push([OpCode.AWAIT, resultReg, promiseReg]);
 
   // Libérer le registre de la promesse après utilisation
   freeRegister(context, promiseReg);
@@ -791,11 +683,11 @@ async function compileFunctionExpression(node, context) {
       length: 0,
       array: [],
       push: function (line) {
-        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.array.push(line);
         this.length++;
       },
       join: function (separator) {
-        return this.array.join(separator);
+        return this.array.map(line => line.join(' ')).join(separator);
       },
     },
     scopeStack: [...context.scopeStack, new Map()],
@@ -812,7 +704,7 @@ async function compileFunctionExpression(node, context) {
   // Emit bytecode to create a new function
 
   // set 
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
+  context.bytecode.push([OpCode.FNEW, functionRegister, `F${context.functions.size}`]);
 
   // Register the function in the current context
   const functionName = node.id ? node.id.name : `anonymous_${context.labelCounter}`;
@@ -821,7 +713,7 @@ async function compileFunctionExpression(node, context) {
     name: functionName,
     startLine: node.loc.start.line,
     endLine: node.loc.end.line,
-    bytecode: functionContext.bytecode
+    bytecode: functionContext.bytecode,
   });
 
   // Add function parameters to the function's scope
@@ -831,7 +723,7 @@ async function compileFunctionExpression(node, context) {
       const paramRegister = newRegister(functionContext);
       functionContext.scopeStack[0].set(param.name, paramRegister);
       // Assuming function arguments are passed in sequential registers
-      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+      functionContext.bytecode.push([OpCode.MOV, paramRegister, `ARG${i}`]);
     } else {
       throw new Error(`Unsupported parameter type: ${param.type}`);
     }
@@ -842,21 +734,11 @@ async function compileFunctionExpression(node, context) {
 
   // Emit return opcode if the function doesn't have an explicit return
   if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
-    functionContext.bytecode.push(`${OpCode.RET}`);
+    functionContext.bytecode.push([OpCode.RET]);
   }
-
-  // Store the function bytecode in the main context
-
-  //context.functionBytecodes.push({
-  //  name: functionName,
-  //  startLine: node.loc.start.line,
-  //  endLine: node.loc.end.line,
-  //  bytecode: functionContext.bytecode
-  //});
 
   return functionRegister;
 }
-
 
 // Function to compile an expression
 async function compileExpression(node, context) {
@@ -896,23 +778,21 @@ async function compileExpression(node, context) {
 }
 
 // Function to compile a literal
-// Function to compile a literal
 function compileLiteral(node, context) {
   const register = newRegister(context);
   if (typeof node.value === 'number') {
-    context.bytecode.push(`${OpCode.KNUM} ${register}, ${node.value}`);
+    context.bytecode.push([OpCode.LOAD, types.Number, register, node.value]);
   } else if (typeof node.value === 'bigint') {
-    context.bytecode.push(`${OpCode.KBIG} ${register}, ${node.value}`);
+    context.bytecode.push([OpCode.LOAD, types.Bigint, register, node.value]);
   } else if (typeof node.value === 'string') {
-    context.bytecode.push(`${OpCode.KSTR} ${register}, "${node.value}"`);
+    context.bytecode.push([OpCode.LOAD, types.String, register, node.value]);
   } else if (typeof node.value === 'boolean') {
     const priValue = node.value ? 1 : 0; // true -> 1, false -> 0
-    context.bytecode.push(`${OpCode.KPRI} ${register}, ${priValue}`);
+    context.bytecode.push([OpCode.LOAD, types.Boolean, register, priValue]);
   } else if (node.value === null) {
-    context.bytecode.push(`${OpCode.KNULL} ${register}`);
+    context.bytecode.push([OpCode.LOAD, types.Null, register, 0]);
   } else if (node.value === undefined) {
-    // Handle `undefined` as a special literal case
-    context.bytecode.push(`${OpCode.KNULL} ${register}`); // Assuming `undefined` can be treated like `null`
+    context.bytecode.push([OpCode.LOAD, types.Undefined, register, 0]);
   } else {
     throw new Error(`Unsupported literal type: ${typeof node.value}`);
   }
@@ -920,13 +800,12 @@ function compileLiteral(node, context) {
   return register;
 }
 
-
 // Resolve an identifier by looking through scopes
 function resolveIdentifier(context, name) {
   if (name === 'undefined') {
     // Handle `undefined` directly
     const register = newRegister(context);
-    context.bytecode.push(`${OpCode.KNULL} ${register}`); // Treat undefined similar to null
+    context.bytecode.push([OpCode.LOAD, types.Undefined, register, 0]);
     return register;
   }
 
@@ -939,13 +818,11 @@ function resolveIdentifier(context, name) {
 
   const register = newRegister(context);
 
-  context.bytecode.push(`${OpCode.GGET} ${register}, "${name}"`);
+  context.bytecode.push([OpCode.GGET, register, `"${name}"`]);
   return register;
 
   throw new Error(`Identifier ${name} not found`);
 }
-
-
 
 // Function to compile a binary expression
 async function compileBinaryExpression(node, context) {
@@ -955,67 +832,67 @@ async function compileBinaryExpression(node, context) {
 
   switch (node.operator) {
     case '+':
-      context.bytecode.push(`${OpCode.ADDVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ADDVV, resultReg, leftReg, rightReg]);
       break;
     case '-':
-      context.bytecode.push(`${OpCode.SUBVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.SUBVV, resultReg, leftReg, rightReg]);
       break;
     case '*':
-      context.bytecode.push(`${OpCode.MULVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.MULVV, resultReg, leftReg, rightReg]);
       break;
     case '/':
-      context.bytecode.push(`${OpCode.DIVVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.DIVVV, resultReg, leftReg, rightReg]);
       break;
     case '&':
-      context.bytecode.push(`${OpCode.BANDVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.BANDVV, resultReg, leftReg, rightReg]);
       break;
     case '|':
-      context.bytecode.push(`${OpCode.BORVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.BORVV, resultReg, leftReg, rightReg]);
       break;
     case '^':
-      context.bytecode.push(`${OpCode.BXORVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.BXORVV, resultReg, leftReg, rightReg]);
       break;
     case '<<':
-      context.bytecode.push(`${OpCode.LSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.LSHVV, resultReg, leftReg, rightReg]);
       break;
     case '>>':
-      context.bytecode.push(`${OpCode.RSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.RSHVV, resultReg, leftReg, rightReg]);
       break;
     case '<<<':
-      context.bytecode.push(`${OpCode.ULSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ULSHVV, resultReg, leftReg, rightReg]);
       break;
     case '>>>':
-      context.bytecode.push(`${OpCode.URSHVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.URSHVV, resultReg, leftReg, rightReg]);
       break;
     case '<':
-      context.bytecode.push(`${OpCode.ISLT} ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISLT, leftReg, rightReg]);
       break;
     case '>':
-      context.bytecode.push(`${OpCode.ISGT} ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISGT, leftReg, rightReg]);
       break;
     case '<=':
-      context.bytecode.push(`${OpCode.ISLE} ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISLE, leftReg, rightReg]);
       break;
     case '>=':
-      context.bytecode.push(`${OpCode.ISGE} ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISGE, leftReg, rightReg]);
       break;
     case '===':
-      context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`); // voir si c'est bien ISEQV
+      context.bytecode.push([OpCode.ISEQV, leftReg, rightReg]);
       break;
     case '==':
-      context.bytecode.push(`${OpCode.ISEQV} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISEQV, leftReg, rightReg]);
       break;
     case '!=':
-      context.bytecode.push(`${OpCode.ISNEV} , ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.ISNEV, leftReg, rightReg]);
       break;
     case '!==':
-      context.bytecode.push(`${OpCode.ISNEV} , ${leftReg}, ${rightReg}`); // voir si c'est bien ISNEV
+      context.bytecode.push([OpCode.ISNEV, leftReg, rightReg]);
       break;
     case '%':
-      context.bytecode.push(`${OpCode.MODVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.MODVV, resultReg, leftReg, rightReg]);
       break;
     case '**':
-      context.bytecode.push(`${OpCode.POWVV} ${resultReg}, ${leftReg}, ${rightReg}`);
+      context.bytecode.push([OpCode.POWVV, resultReg, leftReg, rightReg]);
       break;
     default:
       throw new Error(`Unsupported binary operator: ${node.operator}`);
@@ -1025,22 +902,20 @@ async function compileBinaryExpression(node, context) {
 
 // Fonction pour compiler une expression d'affectation
 async function compileAssignmentExpression(node, context) {
-  console.log("type", node.left.type);
-
   if (node.left.type === 'Identifier') {
     const destReg = resolveIdentifier(context, node.left.name);
 
     // Vérifie si le côté droit est une constante ou une variable
     if (node.right.type === 'Literal') {
       const literalReg = compileLiteral(node.right, context);
-      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${literalReg}`);
+      context.bytecode.push([OpCode.MOV, destReg, literalReg]);
       freeRegister(context, literalReg); // Libérer le registre du littéral après utilisation
     } else if (node.right.type === 'Identifier') {
       const sourceReg = resolveIdentifier(context, node.right.name);
-      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${sourceReg}`);
+      context.bytecode.push([OpCode.MOV, destReg, sourceReg]);
     } else {
       const valueReg = await compileExpression(node.right, context);
-      context.bytecode.push(`${OpCode.MOV} ${destReg}, ${valueReg}`);
+      context.bytecode.push([OpCode.MOV, destReg, valueReg]);
       freeRegister(context, valueReg); // Libérer le registre de valeur après utilisation
     }
 
@@ -1075,7 +950,7 @@ async function compileObjectPatternAssignment(node, context) {
     const valueReg = newRegister(context);
 
     // Génère du bytecode pour extraire la valeur de la propriété de l'objet
-    context.bytecode.push(`${OpCode.OGETV} ${valueReg}, ${sourceReg}, "${key}"`);
+    context.bytecode.push([OpCode.OGETV, valueReg, sourceReg, `"${key}"`]);
 
     // Gérer l'assignation par défaut
     if (property.value.type === 'AssignmentPattern') {
@@ -1093,19 +968,19 @@ async function compileObjectPatternAssignment(node, context) {
       const defaultReg = await compileExpression(right, context);
       const isUndefinedReg = newRegister(context);
 
-      context.bytecode.push(`${OpCode.ISNEV} ${isUndefinedReg}, ${valueReg}`);
-      context.bytecode.push(`${OpCode.JMP} L${context.labelCounter + 1}, ${isUndefinedReg}`);
+      context.bytecode.push([OpCode.ISNEV, isUndefinedReg, valueReg]);
+      context.bytecode.push([OpCode.JMP, `L${context.labelCounter + 1}`, isUndefinedReg]);
 
       // Assigne la valeur à la variable
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
-      context.bytecode.push(`JMP L${context.labelCounter + 2}`);
+      context.bytecode.push([OpCode.MOV, varReg, valueReg]);
+      context.bytecode.push([OpCode.JMP, `L${context.labelCounter + 2}`]);
 
       // Assigne la valeur par défaut
-      context.bytecode.push(`L${context.labelCounter + 1}:`);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${defaultReg}`);
+      context.bytecode.push([`L${context.labelCounter + 1}:`]);
+      context.bytecode.push([OpCode.MOV, varReg, defaultReg]);
 
       // Fin de cette assignation
-      context.bytecode.push(`L${context.labelCounter + 2}:`);
+      context.bytecode.push([`L${context.labelCounter + 2}:`]);
 
       // Incrémente le compteur de labels
       context.labelCounter += 2;
@@ -1115,7 +990,7 @@ async function compileObjectPatternAssignment(node, context) {
     } else if (property.value.type === 'Identifier') {
       const varName = property.value.name;
       const varReg = getRegister(context, varName);
-      context.bytecode.push(`${OpCode.MOV} ${varReg}, ${valueReg}`);
+      context.bytecode.push([OpCode.MOV, varReg, valueReg]);
     } else {
       throw new Error(`Unsupported pattern element in object: ${property.value.type}`);
     }
@@ -1138,17 +1013,17 @@ async function compileMemberAssignmentExpression(node, context) {
     propertyReg = await compileExpression(node.left.property, context);
   } else {
     propertyReg = newRegister(context);
-    context.bytecode.push(`${OpCode.KSTR} ${propertyReg}, "${node.left.property.name}"`);
+    context.bytecode.push([OpCode.LOAD, types.String, propertyReg, `"${node.left.property.name}"`]);
   }
 
   const valueReg = await compileExpression(node.right, context);
 
   if (node.left.computed) {
     // For array elements (computed properties)
-    context.bytecode.push(`${OpCode.ASETV} ${objectReg}, ${propertyReg}, ${valueReg}`);
+    context.bytecode.push([OpCode.ASETV, objectReg, propertyReg, valueReg]);
   } else {
     // For object properties (non-computed properties)
-    context.bytecode.push(`${OpCode.OSETV} ${objectReg}, ${propertyReg}, ${valueReg}`);
+    context.bytecode.push([OpCode.OSETV, objectReg, propertyReg, valueReg]);
   }
 
   return valueReg;
@@ -1156,7 +1031,6 @@ async function compileMemberAssignmentExpression(node, context) {
 
 // Function to compile an if statement
 async function compileIfStatement(node, context) {
-
   const testReg = await compileExpression(node.test, context);
 
   const consequent = node.consequent;
@@ -1165,23 +1039,22 @@ async function compileIfStatement(node, context) {
   const labelTrue = `L${++context.labelCounter}`;
   const labelEnd = `L${++context.labelCounter}`;
 
-  context.bytecode.push(`${OpCode.JMP} ${labelTrue}`);
+  context.bytecode.push([OpCode.JMP, labelTrue]);
 
   // Compile alternate (else) block
   if (alternate) {
     await compileStatement(alternate, context);
   }
   // Jump to end after alternate block
-  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  context.bytecode.push([OpCode.JMP, labelEnd]);
 
   // Compile consequent (if) block
-  context.bytecode.push(`${labelTrue}:`);
+  context.bytecode.push([labelTrue + ':']);
   await compileStatement(consequent, context);
 
-  context.bytecode.push(`${labelEnd}:`);
+  context.bytecode.push([labelEnd + ':']);
 }
 
-// Function to compile a while statement
 // Function to compile a while statement
 async function compileWhileStatement(node, context) {
   const labelStart = `L${++context.labelCounter}`;
@@ -1191,20 +1064,20 @@ async function compileWhileStatement(node, context) {
   context.loopLabels.push({ start: labelStart, end: labelEnd });
 
   // Label for the beginning of the loop
-  context.bytecode.push(`${labelStart}:`);
+  context.bytecode.push([labelStart + ':']);
 
   // Evaluate the test condition
   const testReg = await compileExpression(node.test, context);
-  context.bytecode.push(`${OpCode.JMP} ${labelEnd}`);
+  context.bytecode.push([OpCode.JMP, labelEnd]);
 
   // Compile the loop body
   await compileStatement(node.body, context);
 
   // Jump back to the start of the loop
-  context.bytecode.push(`${OpCode.JMP} ${labelStart}`);
+  context.bytecode.push([OpCode.JMP, labelStart]);
 
   // Label for the end of the loop
-  context.bytecode.push(`${labelEnd}:`);
+  context.bytecode.push([labelEnd + ':']);
 
   // Pop the current loop's labels off the loopLabels stack
   context.loopLabels.pop();
@@ -1218,11 +1091,11 @@ async function compileFunctionDeclaration(node, context) {
       length: 0,
       array: [],
       push: function (line) {
-        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.array.push(line);
         this.length++;
       },
       join: function (separator) {
-        return this.array.join(separator);
+        return this.array.map(line => line.join(' ')).join(separator);
       },
     },
     scopeStack: [...context.scopeStack, new Map()],
@@ -1238,7 +1111,7 @@ async function compileFunctionDeclaration(node, context) {
   const functionRegister = getRegister(context, functionName);
 
   // Emit bytecode to create a new function
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
+  context.bytecode.push([OpCode.FNEW, functionRegister, `F${context.functions.size}`]);
 
   // Register the function in the main context
   context.functions.set(functionName, {
@@ -1255,7 +1128,7 @@ async function compileFunctionDeclaration(node, context) {
       const paramRegister = newRegister(functionContext);
       functionContext.scopeStack[0].set(param.name, paramRegister);
       // Assuming function arguments are passed in sequential registers
-      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+      functionContext.bytecode.push([OpCode.MOV, paramRegister, `ARG${i}`]);
     } else {
       throw new Error(`Unsupported parameter type: ${param.type}`);
     }
@@ -1266,7 +1139,7 @@ async function compileFunctionDeclaration(node, context) {
 
   // Emit return opcode if the function doesn't have an explicit return
   if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
-    functionContext.bytecode.push(`${OpCode.RET}`);
+    functionContext.bytecode.push([OpCode.RET]);
   }
 
   return functionRegister;
@@ -1279,11 +1152,11 @@ async function compileArrowFunctionExpression(node, context) {
       length: 0,
       array: [],
       push: function (line) {
-        this.array.push(`${this.length + 1}`.padStart(4, '0') + "    " + line);
+        this.array.push(line);
         this.length++;
       },
       join: function (separator) {
-        return this.array.join(separator);
+        return this.array.map(line => line.join(' ')).join(separator);
       },
     },
     scopeStack: [...context.scopeStack, new Map()],
@@ -1298,7 +1171,7 @@ async function compileArrowFunctionExpression(node, context) {
   const functionRegister = newRegister(context);
 
   // Emit bytecode to create a new function
-  context.bytecode.push(`${OpCode.FNEW} ${functionRegister} F${context.functions.size}`);
+  context.bytecode.push([OpCode.FNEW, functionRegister, `F${context.functions.size}`]);
 
   // Add function parameters to the function's scope
   for (let i = 0; i < node.params.length; i++) {
@@ -1307,7 +1180,7 @@ async function compileArrowFunctionExpression(node, context) {
       const paramRegister = newRegister(functionContext);
       functionContext.scopeStack[0].set(param.name, paramRegister);
       // Assuming function arguments are passed in sequential registers
-      functionContext.bytecode.push(`${OpCode.MOV} ${paramRegister}, ARG${i}`);
+      functionContext.bytecode.push([OpCode.MOV, paramRegister, `ARG${i}`]);
     } else {
       throw new Error(`Unsupported parameter type: ${param.type}`);
     }
@@ -1316,7 +1189,7 @@ async function compileArrowFunctionExpression(node, context) {
   // Handle concise body single expression arrow functions
   if (node.body.type !== 'BlockStatement') {
     const returnValue = await compileExpression(node.body, functionContext);
-    functionContext.bytecode.push(`${OpCode.RET} ${returnValue}`);
+    functionContext.bytecode.push([OpCode.RET, returnValue]);
     freeRegister(functionContext, returnValue);
   } else {
     // Compile the function body if it's a block statement
@@ -1324,7 +1197,7 @@ async function compileArrowFunctionExpression(node, context) {
 
     // Emit return opcode if the function doesn't have an explicit return
     if (!node.body.body.some(statement => statement.type === 'ReturnStatement')) {
-      functionContext.bytecode.push(`${OpCode.RET}`);
+      functionContext.bytecode.push([OpCode.RET]);
     }
   }
 
@@ -1353,7 +1226,7 @@ async function compileCallExpression(node, context) {
   const numReturnValues = 1;
   const returnRegister = newRegister(context);
 
-  context.bytecode.push(`${OpCode.CALL} ${funcRegister}, ${numArgs}, ${returnRegister}`);
+  context.bytecode.push([OpCode.CALL, funcRegister, numArgs, returnRegister]);
 
   args.forEach(argReg => freeRegister(context, argReg));
 
@@ -1362,7 +1235,6 @@ async function compileCallExpression(node, context) {
 
 // Example usage
 (async () => {
-
   const testFolder = "./test/";
   const files = fs.readdirSync(testFolder);
 
