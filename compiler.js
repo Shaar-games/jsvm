@@ -1,6 +1,18 @@
 const acorn = require('acorn');
 const fs = require('fs');
 // Enumeration for opcodes
+
+const types = {
+  "String": 0,
+  "Number": 1,
+  "Bigint": 2,
+  "Boolean": 3,
+  "Undefined": 4,
+  "Null": 5,
+  "Symbol": 6,
+  "Object": 7,
+}
+
 const OpCode = {
   ADDVN: 'ADDVN',
   ADDNV: 'ADDNV',
@@ -11,6 +23,7 @@ const OpCode = {
   DIVVV: 'DIVVV',
   MOV: 'MOV',
   KNUM: 'KNUM',
+  LOAD: 'LOAD',
   KBIG: 'KBIG',
   KSTR: 'KSTR',
   KPRI: 'KPRI',
@@ -402,7 +415,7 @@ async function compileArrayPattern(declaration, context) {
     // Itérer sur les éléments restants et les ajouter au tableau restant , starting from restIndex to lengthReg-1
 
     const indexReg = newRegister(context);
-    context.bytecode.push(`${OpCode.KNUM} ${indexReg}, ${restIndex}`);
+    context.bytecode.push(`${OpCode.LOAD} ${types.Number}, ${indexReg}, ${restIndex}`);
     context.bytecode.push(`L${context.labelCounter}:`);
     const loopReg = newRegister(context);
     context.bytecode.push(`${OpCode.SUBVV} ${loopReg}, ${lengthReg}, ${indexReg}`);
@@ -785,7 +798,7 @@ async function compileFunctionExpression(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [...context.scopeStack , new Map()],
+    scopeStack: [...context.scopeStack, new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
@@ -1212,7 +1225,7 @@ async function compileFunctionDeclaration(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [...context.scopeStack , new Map()],
+    scopeStack: [...context.scopeStack, new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
@@ -1273,7 +1286,7 @@ async function compileArrowFunctionExpression(node, context) {
         return this.array.join(separator);
       },
     },
-    scopeStack: [...context.scopeStack , new Map()],
+    scopeStack: [...context.scopeStack, new Map()],
     nextRegister: 0,
     labelCounter: 0,
     functions: new Map(),
