@@ -1,5 +1,6 @@
 const acorn = require('acorn');
 const fs = require('fs');
+const { type } = require('os');
 // Enumeration for opcodes
 
 const types = {
@@ -11,6 +12,32 @@ const types = {
   "Null": 5,
   "Symbol": 6,
   "Object": 7,
+
+  "uint8" : 10,
+  "Buint8" : 11,
+
+  "int8" : 12,
+  "Bint8" : 13,
+
+  "uint16" : 14,
+  "Buint16" : 15,
+  
+  "int16" : 16,
+  "Bint16" : 17,
+
+  "uint32" : 18,
+  "Buint32" : 19,
+
+  "int32" : 20,
+  "Bint32" : 21,
+
+  "uint64" : 22,
+  "Buint64" : 23,
+
+  "int64" : 24,
+  "Bint64" : 25,
+
+  "double" : 26,
 };
 
 const OpCode = {
@@ -100,6 +127,7 @@ async function compileProgram(code) {
     functions: new Map(),
     loopLabels: [],
     freeRegisters: [],
+    constants: [] // Int8Array with contains the constants to LOAD , 
   };
 
   await compileBlockStatement(ast, context);
@@ -785,13 +813,60 @@ async function compileExpression(node, context) {
   }
 }
 
+function isFloat(n) {
+  return n === +n && n !== (n|0);
+}
+
+function GetIntegerDataType(number){
+
+  console.log(typeof number)
+  
+  if(typeof number === "number" && isFloat(number)){
+    return types.double
+  }
+
+  if(number >= 0 && number <= 255){
+    return types.uint8
+  }
+
+  if(number >= -128 && number <= 127){
+    return types.int8
+  }
+
+  if(number >= 0 && number <= 65535){
+    return types.uint16
+  }
+
+  if(number >= -32768 && number <= 32767){
+    return types.int16
+  }
+
+  if(number >= -2147483648 && number <= 2147483647){
+    return types.uint32
+  }
+
+  if(number >= 0 && number <= 4294967295){
+    return types.int32
+  }
+
+  if(BigInt(number) >= 0 && BigInt(number) <= 18446744073709551615n){
+    return types.uint64
+  }
+
+  if(BigInt(number) >= -9223372036854775808n && BigInt(number) <= 9223372036854775807n){
+    return types.int64
+  }
+
+  throw new Error(`Unsupported number : ${number}`);
+}
+
 // Function to compile a literal
 function compileLiteral(node, context) {
   const register = newRegister(context);
   if (typeof node.value === 'number') {
-    context.bytecode.push([OpCode.LOAD, types.Number, register, node.value]);
+    context.bytecode.push([OpCode.LOAD, GetIntegerDataType(node.value), register, node.value]);
   } else if (typeof node.value === 'bigint') {
-    context.bytecode.push([OpCode.LOAD, types.Bigint, register, node.value]);
+    context.bytecode.push([OpCode.LOAD, GetIntegerDataType(node.value) + 1, register, node.value]);
   } else if (typeof node.value === 'string') {
     context.bytecode.push([OpCode.LOAD, types.String, register, node.value]);
   } else if (typeof node.value === 'boolean') {
