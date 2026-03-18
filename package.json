@@ -1,4 +1,10 @@
 {
+  "scripts": {
+    "test": "node scripts/run-test-suite.js",
+    "test:local": "node scripts/run-test-suite.js --no-test262",
+    "test:report": "node scripts/run-test-suite.js",
+    "test:prepare": "git submodule update --init --recursive"
+  },
   "dependencies": {
     "@babel/core": "^7.25.2",
     "@babel/generator": "^7.25.0",
