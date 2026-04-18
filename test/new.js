@@ -1,9 +1,7 @@
-//function Car(make, model, year) {
-//  this.make = make;
-//  this.model = model;
-//  this.year = year;
-//}
-//
-//const car1 = new Car('Eagle', 'Talon TSi', 1993);
-//
-//console.log(car1.make);
+function Car(make, year) {
+  this.make = make;
+  this.year = year;
+}
+
+const car = new Car("Eagle", 1993);
+console.log(car.make, car.year);

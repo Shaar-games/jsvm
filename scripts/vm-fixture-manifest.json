@@ -1,0 +1,42 @@
+[
+  {
+    "file": "arithmetic.js",
+    "logs": ["3"]
+  },
+  {
+    "file": "arrays.js",
+    "logs": ["3"]
+  },
+  {
+    "file": "conditions.js",
+    "logs": ["yes"]
+  },
+  {
+    "file": "functions.js",
+    "logs": ["ok"]
+  },
+  {
+    "file": "loops.js",
+    "logs": ["3"]
+  },
+  {
+    "file": "constructors.js",
+    "logs": ["7"]
+  },
+  {
+    "file": "try-catch.js",
+    "logs": ["boom"]
+  },
+  {
+    "file": "for-of.js",
+    "logs": ["6"]
+  },
+  {
+    "file": "classes.js",
+    "logs": ["4"]
+  },
+  {
+    "file": "modules.js",
+    "logs": ["21"]
+  }
+]

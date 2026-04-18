@@ -1,0 +1,89 @@
+// @ts-nocheck
+const OP_NAMES = [
+  "LOADK",
+  "MOVE",
+  "CALL",
+  "CALLSPREAD",
+  "RETURN",
+  "SETFIELD",
+  "GETFIELD",
+  "ARRAY",
+  "ARRAYPUSH",
+  "OBJECT",
+  "NULL",
+  "UNDEF",
+  "BOOL",
+  "ADD",
+  "SUB",
+  "MUL",
+  "DIV",
+  "POW",
+  "BAND",
+  "BOR",
+  "BXOR",
+  "LSH",
+  "RSH",
+  "ULSH",
+  "URSH",
+  "AND",
+  "OR",
+  "XOR",
+  "MOD",
+  "JUMP",
+  "CLOSURE",
+  "GETENV",
+  "SETENV",
+  "ISEQ",
+  "ISLT",
+  "ISGE",
+  "ISLE",
+  "ISGT",
+  "ISNE",
+  "ISIN",
+  "ISINSTANCE",
+  "NOT",
+  "UNM",
+  "AWAIT",
+  "TYPEOF",
+  "EXIT",
+  "JUMPF",
+  "JUMPT",
+  "IMPORT",
+  "GETSTATIC",
+  "PUSH_ENV",
+  "POP_ENV",
+  "LOADVAR",
+  "STOREVAR",
+  "INITVAR",
+  "LOAD_THIS",
+  "NEW",
+  "NEWSPREAD",
+  "THROW",
+  "SETUP_TRY",
+  "END_TRY",
+  "GETERR",
+  "GETITER",
+  "ITERNEXT",
+  "EXPORT",
+  "CLASS",
+  "SETMETHOD"
+];
+
+const OpCode = OP_NAMES.reduce((map, name, index) => {
+  map[name] = index;
+  return map;
+}, {});
+
+const DATA = {
+  INT: 0,
+  LONG: 1,
+  STRING: 2,
+};
+
+module.exports = {
+  OP_NAMES,
+  OpCode,
+  DATA,
+};
+
+export {};

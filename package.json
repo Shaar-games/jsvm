@@ -1,9 +1,17 @@
 {
   "scripts": {
-    "test": "node scripts/run-test-suite.js",
-    "test:local": "node scripts/run-test-suite.js --no-test262",
-    "test:report": "node scripts/run-test-suite.js",
-    "test:prepare": "git submodule update --init --recursive"
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "npm run build && node dist/scripts/run-test-suite.js",
+    "test:fail-fast": "npm run build && node dist/scripts/run-test-suite.js --fail-fast",
+    "test:local": "npm run build && node dist/scripts/run-test-suite.js --no-test262",
+    "test:test262": "npm run build && node dist/scripts/run-test-suite.js --no-local",
+    "test:test262:vm": "npm run build && node dist/scripts/run-test-suite.js --no-local --no-test262 --test262-vm",
+    "test:test262:fail-fast": "npm run build && node dist/scripts/run-test-suite.js --no-local --fail-fast",
+    "test:report": "npm run build && node dist/scripts/run-test-suite.js",
+    "test:prepare": "git submodule update --init --recursive",
+    "test:snapshots": "npm run build && node dist/scripts/check-bytecode-snapshots.js",
+    "test:snapshots:update": "npm run build && node dist/scripts/check-bytecode-snapshots.js --update",
+    "vm:test": "npm run build && node dist/scripts/run-vm-smoke.js"
   },
   "dependencies": {
     "@babel/core": "^7.25.2",
@@ -11,5 +19,9 @@
     "@babel/types": "^7.25.2",
     "acorn": "^8.12.1",
     "escodegen": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.30",
+    "typescript": "^5.6.3"
   }
 }
