@@ -118,6 +118,7 @@ async function runVmCase(fullPath, workspaceRoot, test262TestRoot) {
   const metadata = parseTest262Metadata(code);
   const vmPlan = getVmExecutionPlan(code, metadata);
   const id = path.relative(test262TestRoot, fullPath);
+  const test262HarnessRoot = path.join(path.dirname(test262TestRoot), "harness");
 
   if (!vmPlan.eligible) {
     return {
@@ -133,7 +134,7 @@ async function runVmCase(fullPath, workspaceRoot, test262TestRoot) {
   }
 
   try {
-    const source = buildVmSource(code, metadata);
+    const source = buildVmSource(code, metadata, test262HarnessRoot);
     const compiled = await silenceCompilerLogs(() =>
       compileProgram(source, { sourceType: metadata.sourceType, filename: fullPath })
     );

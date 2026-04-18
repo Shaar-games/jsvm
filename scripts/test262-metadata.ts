@@ -57,6 +57,11 @@ const SUPPORTED_VM_INCLUDES = new Set([
   "compareArray.js",
   "propertyHelper.js",
   "isConstructor.js",
+  "fnGlobalObject.js",
+  "testTypedArray.js",
+]);
+const SOURCE_PRELOADED_VM_INCLUDES = new Set([
+  "testTypedArray.js",
 ]);
 const UNSUPPORTED_VM_FLAGS = new Set(["async"]);
 const UNSUPPORTED_VM_FEATURES = new Set(["IsHTMLDDA"]);
@@ -131,12 +136,27 @@ function getVmExecutionPlan(code, metadata) {
   };
 }
 
-function buildVmSource(code, metadata) {
-  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
-    return `"use strict";\n${code}`;
+function buildVmSource(code, metadata, harnessRoot = null) {
+  const sourceChunks = [];
+
+  if (harnessRoot) {
+    for (const include of metadata.includes) {
+      if (!SOURCE_PRELOADED_VM_INCLUDES.has(include)) {
+        continue;
+      }
+
+      const includePath = path.join(harnessRoot, include);
+      sourceChunks.push(fs.readFileSync(includePath, "utf8"));
+    }
   }
 
-  return code;
+  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
+    sourceChunks.push(`"use strict";\n${code}`);
+    return sourceChunks.join("\n");
+  }
+
+  sourceChunks.push(code);
+  return sourceChunks.join("\n");
 }
 
 module.exports = {
@@ -146,3 +166,5 @@ module.exports = {
 };
 
 export {};
+const fs = require("fs");
+const path = require("path");

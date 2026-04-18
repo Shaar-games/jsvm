@@ -1,5 +1,6 @@
 // @ts-nocheck
 const nodeVm = require("vm");
+const { normalizeLegacyBuiltins } = require("../vm/runtime");
 
 class Test262Error extends Error {
   constructor(message) {
@@ -223,6 +224,7 @@ function createTest262Harness() {
     const sandbox = {};
     const context = nodeVm.createContext(sandbox);
     const global = nodeVm.runInContext("this", context);
+    normalizeLegacyBuiltins(global);
     return {
       global,
       evalScript(source) {

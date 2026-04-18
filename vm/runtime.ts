@@ -1,4 +1,5 @@
 // @ts-nocheck
+const acorn = require("acorn");
 const path = require("path");
 const fs = require("fs");
 const { createEnvironment, getBinding, initBinding, storeBinding, TDZ } = require("./environment");
@@ -16,8 +17,32 @@ class BytecodeVM {
     this.require = typeof options.require === "function" ? options.require : require;
     this.functionTable = buildFunctionTable(program.functions || []);
     this.staticValues = (program.staticSection && program.staticSection.values) || [];
-    this.globalObject = buildRuntimeEnv(options.env || options.globals || {});
+    this.globalObject = options.runtimeGlobal || buildRuntimeEnv(options.env || options.globals || {});
     this.env = this.globalObject;
+    if (!this.globalObject.eval || !this.globalObject.eval.__jsvmDirectEval) {
+      const directEval = function jsvmEval() {
+        throw new Error("Direct eval interception should be handled by the VM call dispatcher");
+      };
+      directEval.__jsvmDirectEval = true;
+      Object.defineProperty(this.globalObject, "eval", {
+        value: directEval,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+    if (!this.globalObject.require || !this.globalObject.require.__jsvmRequire) {
+      const directRequire = function jsvmRequire() {
+        throw new Error("Require interception should be handled by the VM call dispatcher");
+      };
+      directRequire.__jsvmRequire = true;
+      Object.defineProperty(this.globalObject, "require", {
+        value: directRequire,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
   }
 
   async execute() {
@@ -63,6 +88,14 @@ class BytecodeVM {
       functionMeta.paramBindings.forEach((bindingRef, index) => {
         initBinding(execState.envStack, bindingRef.depth, bindingRef.slot, args[index]);
       });
+    }
+    if (functionMeta && functionMeta.argumentsBinding) {
+      initBinding(
+        execState.envStack,
+        functionMeta.argumentsBinding.depth,
+        functionMeta.argumentsBinding.slot,
+        createArgumentsObject(args)
+      );
     }
     if (functionMeta && functionMeta.restBinding) {
       initBinding(
@@ -146,6 +179,14 @@ class BytecodeVM {
       functionMeta.paramBindings.forEach((bindingRef, index) => {
         initBinding(execState.envStack, bindingRef.depth, bindingRef.slot, args[index]);
       });
+    }
+    if (functionMeta && functionMeta.argumentsBinding) {
+      initBinding(
+        execState.envStack,
+        functionMeta.argumentsBinding.depth,
+        functionMeta.argumentsBinding.slot,
+        createArgumentsObject(args)
+      );
     }
     if (functionMeta && functionMeta.restBinding) {
       initBinding(
@@ -237,47 +278,52 @@ class BytecodeVM {
   }
 
   async importModule(specifier) {
-    if (this.moduleCache.has(specifier)) {
-      return this.moduleCache.get(specifier);
-    }
-
-    if (Object.prototype.hasOwnProperty.call(this.moduleOverrides, specifier)) {
-      const overrideValue = this.moduleOverrides[specifier];
-      const namespace = normalizeModuleNamespace(overrideValue);
-      this.moduleCache.set(specifier, namespace);
-      return namespace;
-    }
-
-    if (!this.compiler || !this.filename) {
-      const fallback = this.resolveExternalModule(specifier);
-      this.moduleCache.set(specifier, fallback);
-      return fallback;
-    }
-
-    const resolvedPath = this.resolveImportPath(specifier);
-    if (!resolvedPath) {
-      const fallback = this.resolveExternalModule(specifier);
-      this.moduleCache.set(specifier, fallback);
-      return fallback;
-    }
-    const source = fs.readFileSync(resolvedPath, "utf8");
-    const compiled = await this.compiler(source, {
-      sourceType: "module",
-      filename: resolvedPath,
+    return this.loadModule(specifier, {
+      mode: "import",
+      parentFilename: this.filename,
     });
-    const childProgram = compiled.program || compiled;
-    const childVm = new BytecodeVM(childProgram, {
+  }
+
+  async evaluateSource(source, state, options = {}) {
+    if (typeof source !== "string") {
+      return this.globalObject.eval(source);
+    }
+
+    if (!this.compiler) {
+      return globalThis.eval(source);
+    }
+
+    if (!options.indirect) {
+      for (const name of collectSloppyBlockFunctionNames(source)) {
+        if (!(name in this.globalObject)) {
+          this.globalObject[name] = undefined;
+        }
+      }
+    }
+
+    const compiled = await this.compiler(source, {
+      sourceType: "script",
+      scriptMode: options.indirect ? "global" : "eval",
+      filename: `${this.filename || "<eval>"}#eval`,
+    });
+    const program = compiled.program || compiled;
+    const evalVm = new BytecodeVM(program, {
       compiler: this.compiler,
-      filename: resolvedPath,
-      env: this.env,
+      filename: `${this.filename || "<eval>"}#eval`,
+      runtimeGlobal: this.globalObject,
       modules: this.moduleOverrides,
       require: this.require,
       moduleCache: this.moduleCache,
     });
-    await childVm.execute();
-    const namespace = childVm.lastExports || {};
-    this.moduleCache.set(specifier, namespace);
-    return namespace;
+    const nextState = {
+      envStack: options.indirect ? [createEnvironment()] : state.envStack,
+      registers: createRegisters(),
+      thisValue: options.indirect ? this.globalObject : state.thisValue,
+      tryStack: [],
+      exports: state.exports,
+      pendingError: undefined,
+    };
+    return evalVm.executeChunk(program.entry, null, [], nextState);
   }
 
   resolveImportPath(specifier) {
@@ -308,7 +354,195 @@ class BytecodeVM {
       throw error;
     }
   }
+
+  async requireModule(specifier, parentFilename = this.filename, state = null) {
+    return this.loadModule(specifier, {
+      mode: "require",
+      parentFilename,
+      state,
+    });
+  }
+
+  async loadModule(specifier, options = {}) {
+    const mode = options.mode || "import";
+    const parentFilename = options.parentFilename || this.filename;
+    const cacheKey = `${mode}:${parentFilename || "<root>"}:${specifier}`;
+    if (this.moduleCache.has(cacheKey)) {
+      return this.moduleCache.get(cacheKey);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(this.moduleOverrides, specifier)) {
+      const overrideValue = this.moduleOverrides[specifier];
+      const normalized = mode === "import"
+        ? normalizeModuleNamespace(overrideValue, specifier)
+        : overrideValue;
+      this.moduleCache.set(cacheKey, normalized);
+      return normalized;
+    }
+
+    const resolvedPath = this.resolveModulePath(specifier, parentFilename);
+    if (!resolvedPath) {
+      const fallback = this.resolveExternalModule(specifier);
+      const normalized = mode === "import" ? fallback : ("default" in fallback ? fallback.default : fallback);
+      this.moduleCache.set(cacheKey, normalized);
+      return normalized;
+    }
+
+    if (resolvedPath.endsWith(".json")) {
+      const jsonValue = JSON.parse(fs.readFileSync(resolvedPath, "utf8"));
+      const normalized = mode === "import"
+        ? normalizeModuleNamespace(jsonValue, resolvedPath)
+        : jsonValue;
+      this.moduleCache.set(cacheKey, normalized);
+      return normalized;
+    }
+
+    const source = fs.readFileSync(resolvedPath, "utf8");
+    const sourceType = mode === "import" || looksLikeESModule(source, resolvedPath) ? "module" : "script";
+    const compiled = await this.compiler(source, {
+      sourceType,
+      scriptMode: sourceType === "module" ? "module" : (mode === "require" ? "commonjs" : "global"),
+      filename: resolvedPath,
+    });
+    const childProgram = compiled.program || compiled;
+    const childVm = new BytecodeVM(childProgram, {
+      compiler: this.compiler,
+      filename: resolvedPath,
+      runtimeGlobal: this.globalObject,
+      modules: this.moduleOverrides,
+      require: this.require,
+      moduleCache: this.moduleCache,
+    });
+
+    let result;
+    if (sourceType === "module") {
+      await childVm.execute();
+      result = childVm.lastExports || {};
+      result = mode === "import" ? normalizeModuleNamespace(result, resolvedPath) : result;
+    } else {
+      if (mode === "require" && options.state && !looksLikeCommonJs(source)) {
+        result = await childVm.executeScriptInCallerScope(options.state);
+      } else {
+        const module = { exports: {} };
+        result = await childVm.executeCommonJsModule(module);
+      }
+      result = mode === "import" ? normalizeModuleNamespace(result, resolvedPath) : result;
+    }
+
+    this.moduleCache.set(cacheKey, result);
+    return result;
+  }
+
+  async executeCommonJsModule(module) {
+    const previous = captureGlobalSlots(this.globalObject, [
+      "module",
+      "exports",
+      "__filename",
+      "__dirname",
+    ]);
+    this.globalObject.module = module;
+    this.globalObject.exports = module.exports;
+    this.globalObject.__filename = this.filename;
+    this.globalObject.__dirname = this.filename ? path.dirname(this.filename) : undefined;
+
+    try {
+      await this.execute();
+      return module.exports;
+    } finally {
+      restoreGlobalSlots(this.globalObject, previous);
+    }
+  }
+
+  async executeScriptInCallerScope(state) {
+    const nextState = {
+      envStack: state.envStack,
+      registers: createRegisters(),
+      thisValue: state.thisValue,
+      tryStack: [],
+      exports: state.exports,
+      pendingError: undefined,
+    };
+    return this.executeChunk(this.program.entry, null, [], nextState);
+  }
+
+  resolveModulePath(specifier, parentFilename = this.filename) {
+    if (!specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.match(/^[A-Za-z]:[\\/]/)) {
+      return null;
+    }
+
+    const basePath = parentFilename ? path.dirname(parentFilename) : process.cwd();
+    const absolutePath = path.resolve(basePath, specifier);
+    const candidates = [
+      absolutePath,
+      `${absolutePath}.js`,
+      `${absolutePath}.mjs`,
+      `${absolutePath}.cjs`,
+      `${absolutePath}.json`,
+      path.join(absolutePath, "index.js"),
+      path.join(absolutePath, "index.mjs"),
+      path.join(absolutePath, "index.cjs"),
+      path.join(absolutePath, "index.json"),
+    ];
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
 }
+
+function collectSloppyBlockFunctionNames(source) {
+  try {
+    const ast = acorn.parse(source, { ecmaVersion: 2022, sourceType: "script" });
+    const names = new Set();
+    walkForBlockFunctions(ast, false, names);
+    return names;
+  } catch {
+    return [];
+  }
+}
+
+function walkForBlockFunctions(node, insideBlock, names) {
+  if (!node || typeof node !== "object") {
+    return;
+  }
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      walkForBlockFunctions(item, insideBlock, names);
+    }
+    return;
+  }
+
+  if (node.type === "FunctionDeclaration" && insideBlock && node.id && node.id.name) {
+    names.add(node.id.name);
+  }
+
+  const nextInsideBlock = insideBlock || ANNEX_B_FUNCTION_CONTAINERS.has(node.type);
+  for (const value of Object.values(node)) {
+    if (!value || typeof value !== "object") {
+      continue;
+    }
+    walkForBlockFunctions(value, nextInsideBlock, names);
+  }
+}
+
+const ANNEX_B_FUNCTION_CONTAINERS = new Set([
+  "BlockStatement",
+  "IfStatement",
+  "SwitchStatement",
+  "SwitchCase",
+  "ForStatement",
+  "ForInStatement",
+  "ForOfStatement",
+  "WhileStatement",
+  "DoWhileStatement",
+  "TryStatement",
+  "CatchClause",
+]);
 
 function buildRuntimeEnv(extraEnv = {}) {
   const runtimeGlobal = {};
@@ -332,6 +566,16 @@ function buildRuntimeEnv(extraEnv = {}) {
     enumerable: false,
     configurable: true,
   });
+  if (typeof runtimeGlobal.fnGlobalObject !== "function") {
+    Object.defineProperty(runtimeGlobal, "fnGlobalObject", {
+      value() {
+        return runtimeGlobal;
+      },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
   normalizeLegacyBuiltins(runtimeGlobal);
   return runtimeGlobal;
 }
@@ -379,6 +623,12 @@ function normalizeLegacyBuiltins(runtimeGlobal) {
   normalizeLegacyStringHtmlMethods(runtimeGlobal);
   normalizeLegacyRegExpAccessors(runtimeGlobal);
   normalizeLegacyRegExpCompile(runtimeGlobal);
+}
+
+function createArgumentsObject(args) {
+  return function makeArgumentsObject() {
+    return arguments;
+  }(...args);
 }
 
 function normalizeLegacyEscape(runtimeGlobal) {
@@ -502,6 +752,7 @@ function normalizeLegacyRegExpCompile(runtimeGlobal) {
   if (typeof RegExpCtor !== "function" || !RegExpCtor.prototype) {
     return;
   }
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
 
   const nativeCompile = typeof RegExpCtor.prototype.compile === "function"
     ? RegExpCtor.prototype.compile
@@ -510,15 +761,15 @@ function normalizeLegacyRegExpCompile(runtimeGlobal) {
   Object.defineProperty(RegExpCtor.prototype, "compile", {
     value: function compile(pattern, flags) {
       if (this === null || this === undefined || typeof this !== "object") {
-        throw new TypeError("RegExp.prototype.compile requires an object receiver");
+        throw new TypeErrorCtor("RegExp.prototype.compile requires an object receiver");
       }
 
       if (Object.prototype.toString.call(this) !== "[object RegExp]") {
-        throw new TypeError("RegExp.prototype.compile requires a RegExp receiver");
+        throw new TypeErrorCtor("RegExp.prototype.compile requires a RegExp receiver");
       }
 
       if (!prototypeChainIncludes(this, RegExpCtor.prototype)) {
-        throw new TypeError("RegExp.prototype.compile cross-realm receiver mismatch");
+        throw new TypeErrorCtor("RegExp.prototype.compile cross-realm receiver mismatch");
       }
 
       if (nativeCompile) {
@@ -616,6 +867,36 @@ function normalizeModuleNamespace(moduleValue, specifier = null) {
   };
 }
 
+function looksLikeESModule(source, filename) {
+  if (filename && /\.mjs$/i.test(filename)) {
+    return true;
+  }
+
+  return /^\s*(import|export)\b/m.test(source);
+}
+
+function looksLikeCommonJs(source) {
+  return /\bmodule\.exports\b|\bexports\.[A-Za-z_$]|\brequire\s*\(/.test(source);
+}
+
+function captureGlobalSlots(globalObject, names) {
+  return names.map((name) => ({
+    name,
+    existed: Object.prototype.hasOwnProperty.call(globalObject, name),
+    value: globalObject[name],
+  }));
+}
+
+function restoreGlobalSlots(globalObject, entries) {
+  for (const entry of entries) {
+    if (entry.existed) {
+      globalObject[entry.name] = entry.value;
+    } else {
+      delete globalObject[entry.name];
+    }
+  }
+}
+
 async function executeCompiledProgram(compiledProgram, options = {}) {
   const program = compiledProgram.program || compiledProgram;
   const vm = new BytecodeVM(program, options);
@@ -625,6 +906,7 @@ async function executeCompiledProgram(compiledProgram, options = {}) {
 module.exports = {
   BytecodeVM,
   executeCompiledProgram,
+  normalizeLegacyBuiltins,
 };
 
 export {};

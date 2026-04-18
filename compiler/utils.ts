@@ -78,6 +78,20 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
     throw new Error(`Unsupported parameter type: ${param.type}`);
   }
 
+  if (node.type !== "ArrowFunctionExpression") {
+    const currentFunctionScope = functionContext.scopeStack[functionContext.scopeStack.length - 1];
+    if (!currentFunctionScope.bindings.has("arguments")) {
+      const argumentsBinding = declareBinding(functionContext, "arguments", {
+        kind: "implicit-arguments",
+        declarationKind: "implicit",
+      });
+      functionContext.argumentsBinding = {
+        depth: 0,
+        slot: argumentsBinding.slot,
+      };
+    }
+  }
+
   const functionId = registerCompiledFunction(
     context,
     node,

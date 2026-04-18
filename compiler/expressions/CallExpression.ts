@@ -5,6 +5,7 @@ const { OpCode, emit, emitLoadConstant, newRegister, loadBindingValue } = requir
 async function compileCallExpression(node, context) {
   let functionRegister;
   let thisRegister = null;
+  let callMode = "default";
 
   if (node.callee.type === "MemberExpression") {
     thisRegister = await compileExpression(node.callee.object, context);
@@ -19,6 +20,9 @@ async function compileCallExpression(node, context) {
     emit(context, [OpCode.GETFIELD, functionRegister, thisRegister, propertyRegister]);
   } else if (node.callee.type === "Identifier") {
     functionRegister = loadBindingValue(context, node.callee.name);
+    if (node.callee.name === "eval") {
+      callMode = "direct-eval";
+    }
   } else {
     functionRegister = await compileExpression(node.callee, context);
   }
@@ -37,6 +41,7 @@ async function compileCallExpression(node, context) {
       argumentRegisters.length,
       returnRegister,
       thisRegister || "null",
+      callMode,
       ...argumentRegisters,
     ]);
     return returnRegister;
@@ -68,7 +73,7 @@ async function compileCallExpression(node, context) {
   }
 
   const returnRegister = newRegister(context);
-  emit(context, [OpCode.CALLSPREAD, functionRegister, argsArrayRegister, returnRegister, thisRegister || "null"]);
+  emit(context, [OpCode.CALLSPREAD, functionRegister, argsArrayRegister, returnRegister, thisRegister || "null", callMode]);
   return returnRegister;
 }
 

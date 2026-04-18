@@ -1,6 +1,7 @@
 // @ts-nocheck
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
+const { withAnnexBBlockFunctionContext } = require("../annex-b");
 const { OpCode, emit, emitLabel, makeLabel } = require("../utils");
 
 async function compileForStatement(node, context) {
@@ -22,7 +23,7 @@ async function compileForStatement(node, context) {
     emit(context, [OpCode.JUMPF, testRegister, endLabel]);
   }
 
-  await compileStatement(node.body, context);
+  await withAnnexBBlockFunctionContext(context, () => compileStatement(node.body, context));
 
   if (node.update) {
     await compileExpression(node.update, context);

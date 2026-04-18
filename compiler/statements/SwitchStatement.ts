@@ -1,6 +1,7 @@
 // @ts-nocheck
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
+const { withAnnexBBlockFunctionContext } = require("../annex-b");
 const { OpCode, emit, emitLabel, makeLabel, newRegister } = require("../utils");
 
 async function compileSwitchStatement(node, context) {
@@ -28,7 +29,7 @@ async function compileSwitchStatement(node, context) {
   for (let index = 0; index < node.cases.length; index += 1) {
     emitLabel(context, caseLabels[index]);
     for (const statement of node.cases[index].consequent) {
-      await compileStatement(statement, context);
+      await withAnnexBBlockFunctionContext(context, () => compileStatement(statement, context));
     }
   }
 

@@ -152,6 +152,28 @@ function declareBinding(context, name, meta = {}) {
   return binding;
 }
 
+function declareRootBinding(context, name, meta = {}) {
+  const scope = context.scopeStack[0];
+  if (scope.bindings.has(name)) {
+    return {
+      binding: scope.bindings.get(name),
+      created: false,
+    };
+  }
+
+  const binding = {
+    name,
+    slot: scope.nextSlot,
+    ...meta,
+  };
+  scope.nextSlot += 1;
+  scope.bindings.set(name, binding);
+  return {
+    binding,
+    created: true,
+  };
+}
+
 function resolveBinding(context, name) {
   for (let index = context.scopeStack.length - 1; index >= 0; index -= 1) {
     const scope = context.scopeStack[index];
@@ -174,6 +196,18 @@ function resolveBindingReference(context, name) {
   }
 
   return null;
+}
+
+function resolveRootBindingReference(context, name) {
+  const scope = context.scopeStack[0];
+  if (!scope.bindings.has(name)) {
+    return null;
+  }
+
+  return {
+    binding: scope.bindings.get(name),
+    depth: context.scopeStack.length - 1,
+  };
 }
 
 function getRegister(context, name, meta = {}) {
@@ -211,6 +245,7 @@ function registerCompiledFunction(context, node, functionContext, functionName, 
       const reference = resolveBindingReference(functionContext, name);
       return { depth: reference.depth, slot: reference.binding.slot };
     }),
+    argumentsBinding: functionContext.argumentsBinding || null,
     restBinding: functionContext.restBinding || null,
     thisMode: functionContext.thisMode || "dynamic",
     isAsync: Boolean(node.async),
@@ -228,6 +263,7 @@ function serializeFunctions(functions) {
     name: func.name,
     params: func.params,
     paramBindings: func.paramBindings,
+    argumentsBinding: func.argumentsBinding,
     restBinding: func.restBinding,
     thisMode: func.thisMode,
     isAsync: Boolean(func.isAsync),
@@ -242,6 +278,7 @@ module.exports = {
   createChildContext,
   createScope,
   currentScope,
+  declareRootBinding,
   declareBinding,
   emit,
   emitLabel,
@@ -250,6 +287,7 @@ module.exports = {
   makeLabel,
   newRegister,
   resolveBindingReference,
+  resolveRootBindingReference,
   popScope,
   pushScope,
   registerCompiledFunction,

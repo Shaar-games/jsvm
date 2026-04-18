@@ -3,7 +3,15 @@ const { OpCode } = require("../../bytecode/opcodes");
 const { createEnvironment } = require("../environment");
 const { createRegisters } = require("../registers");
 
-function invokeCallableSync(vm, fn, thisArg, argsValues) {
+function invokeCallableSync(vm, state, fn, thisArg, argsValues, callMode) {
+  if (fn && fn.__jsvmRequire) {
+    throw new Error("Require is not supported in sync VM path");
+  }
+
+  if (fn && fn.__jsvmDirectEval) {
+    throw new Error("Eval is not supported in sync VM path");
+  }
+
   if (fn && typeof fn.__jsvmInvokeSync === "function") {
     return fn.__jsvmInvokeSync(thisArg, argsValues);
   }
@@ -15,7 +23,17 @@ function invokeCallableSync(vm, fn, thisArg, argsValues) {
   return fn.apply(thisArg, argsValues);
 }
 
-async function invokeCallableAsync(vm, fn, thisArg, argsValues) {
+async function invokeCallableAsync(vm, state, fn, thisArg, argsValues, callMode) {
+  if (fn && fn.__jsvmRequire) {
+    return vm.requireModule(argsValues[0], vm.filename, state);
+  }
+
+  if (fn && fn.__jsvmDirectEval) {
+    return vm.evaluateSource(argsValues[0], state, {
+      indirect: callMode !== "direct-eval",
+    });
+  }
+
   if (fn && typeof fn.__jsvmInvoke === "function") {
     return fn.__jsvmInvoke(thisArg, argsValues);
   }
@@ -30,22 +48,22 @@ async function invokeCallableAsync(vm, fn, thisArg, argsValues) {
 async function handleFunction(vm, state, instruction) {
   switch (instruction[0]) {
     case OpCode.CALL: {
-      const [, functionRegister, argCount, returnRegister, thisRegister, ...argRegisters] = instruction;
+      const [, functionRegister, argCount, returnRegister, thisRegister, callMode, ...argRegisters] = instruction;
       const fn = state.resolveValue(functionRegister);
       const thisArg = thisRegister === "null" ? null : state.resolveValue(thisRegister);
       const argsValues = argRegisters
         .slice(0, argCount)
         .map((registerName) => state.resolveValue(registerName));
-      const result = await invokeCallableAsync(vm, fn, thisArg, argsValues);
+      const result = await invokeCallableAsync(vm, state, fn, thisArg, argsValues, callMode);
       state.setRegister(returnRegister, result);
       return null;
     }
     case OpCode.CALLSPREAD: {
-      const [, functionRegister, argsArrayRegister, returnRegister, thisRegister] = instruction;
+      const [, functionRegister, argsArrayRegister, returnRegister, thisRegister, callMode] = instruction;
       const fn = state.resolveValue(functionRegister);
       const thisArg = thisRegister === "null" ? null : state.resolveValue(thisRegister);
       const argsValues = state.resolveValue(argsArrayRegister);
-      const result = await invokeCallableAsync(vm, fn, thisArg, argsValues);
+      const result = await invokeCallableAsync(vm, state, fn, thisArg, argsValues, callMode);
       state.setRegister(returnRegister, result);
       return null;
     }
@@ -219,22 +237,22 @@ module.exports = {
   handleFunctionSync(vm, state, instruction) {
     switch (instruction[0]) {
       case OpCode.CALL: {
-        const [, functionRegister, argCount, returnRegister, thisRegister, ...argRegisters] = instruction;
+        const [, functionRegister, argCount, returnRegister, thisRegister, callMode, ...argRegisters] = instruction;
         const fn = state.resolveValue(functionRegister);
         const thisArg = thisRegister === "null" ? null : state.resolveValue(thisRegister);
         const argsValues = argRegisters
           .slice(0, argCount)
           .map((registerName) => state.resolveValue(registerName));
-        const result = invokeCallableSync(vm, fn, thisArg, argsValues);
+        const result = invokeCallableSync(vm, state, fn, thisArg, argsValues, callMode);
         state.setRegister(returnRegister, result);
         return null;
       }
       case OpCode.CALLSPREAD: {
-        const [, functionRegister, argsArrayRegister, returnRegister, thisRegister] = instruction;
+        const [, functionRegister, argsArrayRegister, returnRegister, thisRegister, callMode] = instruction;
         const fn = state.resolveValue(functionRegister);
         const thisArg = thisRegister === "null" ? null : state.resolveValue(thisRegister);
         const argsValues = state.resolveValue(argsArrayRegister);
-        const result = invokeCallableSync(vm, fn, thisArg, argsValues);
+        const result = invokeCallableSync(vm, state, fn, thisArg, argsValues, callMode);
         state.setRegister(returnRegister, result);
         return null;
       }

@@ -57,7 +57,10 @@ const statementHandlers = {
 async function compileProgram(code, options = {}) {
   const { sourceType = "module", debug = false, filename = null } = options;
   const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType, locations: true });
-  const context = createContext(options);
+  const context = createContext({
+    ...options,
+    scriptMode: options.scriptMode || (sourceType === "script" ? "global" : "module"),
+  });
   context.expressionHandlers = expressionHandlers;
   context.statementHandlers = statementHandlers;
 
@@ -69,6 +72,7 @@ async function compileProgram(code, options = {}) {
 
   const program = {
     sourceType,
+    scriptMode: context.options.scriptMode,
     filename,
     staticSection: {
       values: context.staticSection.values.slice(),

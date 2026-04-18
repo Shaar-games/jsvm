@@ -39,6 +39,8 @@ The expected architecture is:
 - `depth = 0` is the current environment, larger depths are outer scopes.
 - VM execution must consume the compiler output directly.
 - Do not reintroduce the old `frame` abstraction now that `registers` and `environment` are explicit modules.
+- The long-term target is a complete execution system: local code loaded through `import` or `require` should be compiled and then executed by the VM, not bypassed through host evaluation.
+- Test harness code should be compiled through the same pipeline whenever practical; keep runtime-only helpers limited to cases that cannot yet be expressed through the compiler/VM.
 
 ## Opcode guidance
 
@@ -79,10 +81,17 @@ The expected architecture is:
 - `npm run test:snapshots:update`
 - `npm run vm:test`
 
+## Runner constraints
+
+- Do not run the VM runner in parallel with `npm run build` or `npm run test:test262`.
+- `build` deletes `dist/`, which breaks the worker-based VM runner if both execute at the same time.
+- Run build/test262 compilation first, then launch VM runs sequentially.
+
 ## Technical priorities
 
 1. Stabilize the bytecode contract.
 2. Keep compiler handlers modular.
 3. Keep lexical environment semantics explicit.
-4. Expand feature support incrementally with tests and snapshots.
-5. Remove dead files when architecture changes make them obsolete.
+4. Move module loading toward a unified `import` / `require` pipeline that compiles local dependencies.
+5. Expand feature support incrementally with tests and snapshots.
+6. Remove dead files when architecture changes make them obsolete.
