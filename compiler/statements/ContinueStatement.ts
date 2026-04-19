@@ -1,11 +1,12 @@
 // @ts-nocheck
-const { OpCode, emit } = require("../utils");
+const { OpCode, emit, resolveContinueTarget } = require("../utils");
 
 async function compileContinueStatement(node, context) {
-  if (context.loopLabels.length === 0) {
+  const continueTarget = resolveContinueTarget(context, node.label ? node.label.name : null);
+  if (!continueTarget) {
     throw new Error("ContinueStatement used outside of a loop");
   }
-  emit(context, [OpCode.JUMP, context.loopLabels[context.loopLabels.length - 1].start]);
+  emit(context, [OpCode.JUMP, continueTarget]);
 }
 
 module.exports = compileContinueStatement;

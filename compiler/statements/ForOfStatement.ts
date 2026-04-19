@@ -2,7 +2,7 @@
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
 const { pushScope, popScope } = require("../context");
-const { OpCode, emit, emitLabel, initializeBinding, makeLabel, newRegister, storeBindingValue } = require("../utils");
+const { OpCode, emit, emitLabel, initializeBinding, makeLabel, newRegister, popControlLabel, pushControlLabel, storeBindingValue } = require("../utils");
 
 async function compileForOfStatement(node, context) {
   const iterableRegister = await compileExpression(node.right, context);
@@ -13,6 +13,7 @@ async function compileForOfStatement(node, context) {
   const endLabel = makeLabel(context, "ENDFOROF");
 
   emit(context, [OpCode.GETITER, iteratorRegister, iterableRegister]);
+  pushControlLabel(context, { continueLabel: loopLabel, breakLabel: endLabel });
   emitLabel(context, loopLabel);
   emit(context, [OpCode.ITERNEXT, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);
@@ -33,6 +34,7 @@ async function compileForOfStatement(node, context) {
   popScope(context);
   emit(context, [OpCode.JUMP, loopLabel]);
   emitLabel(context, endLabel);
+  popControlLabel(context);
 }
 
 module.exports = compileForOfStatement;

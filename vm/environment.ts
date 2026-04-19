@@ -18,7 +18,7 @@ function initBinding(envStack, depth, slot, value) {
   if (!env) {
     throw new Error(`Invalid environment depth: ${depth}`);
   }
-  env[slot] = value;
+  defineOwnIndexedValue(env, slot, value);
   return value;
 }
 
@@ -30,8 +30,17 @@ function storeBinding(envStack, depth, slot, value) {
   if (!(slot in env)) {
     throw new ReferenceError(`Cannot assign to undeclared binding at depth ${depth}, slot ${slot}`);
   }
-  env[slot] = value;
+  defineOwnIndexedValue(env, slot, value);
   return value;
+}
+
+function defineOwnIndexedValue(target, index, value) {
+  Object.defineProperty(target, index, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 module.exports = {

@@ -59,14 +59,35 @@ const SUPPORTED_VM_INCLUDES = new Set([
   "isConstructor.js",
   "fnGlobalObject.js",
   "testTypedArray.js",
+  "iteratorZipUtils.js",
+  "proxyTrapsHelper.js",
+  "asyncHelpers.js",
+  "promiseHelper.js",
+  "detachArrayBuffer.js",
+  "resizableArrayBufferUtils.js",
 ]);
 const SOURCE_PRELOADED_VM_INCLUDES = new Set([
   "testTypedArray.js",
+  "iteratorZipUtils.js",
+  "proxyTrapsHelper.js",
+  "asyncHelpers.js",
+  "promiseHelper.js",
+  "detachArrayBuffer.js",
+  "resizableArrayBufferUtils.js",
 ]);
-const UNSUPPORTED_VM_FLAGS = new Set(["async"]);
-const UNSUPPORTED_VM_FEATURES = new Set(["IsHTMLDDA"]);
+const UNSUPPORTED_VM_FLAGS = new Set([]);
+const UNSUPPORTED_VM_FEATURES_BY_HOST = {
+  node: new Set(["IsHTMLDDA"]),
+};
 
-function getVmExecutionPlan(code, metadata) {
+function getUnsupportedVmFeatures(hostRuntime = "node") {
+  return UNSUPPORTED_VM_FEATURES_BY_HOST[hostRuntime] || new Set();
+}
+
+function getVmExecutionPlan(code, metadata, options = {}) {
+  const hostRuntime = options.hostRuntime || "node";
+  const unsupportedVmFeatures = getUnsupportedVmFeatures(hostRuntime);
+
   if (metadata.expectCompileFailure) {
     return {
       eligible: false,
@@ -104,21 +125,13 @@ function getVmExecutionPlan(code, metadata) {
   }
 
   for (const feature of metadata.features) {
-    if (UNSUPPORTED_VM_FEATURES.has(feature)) {
+    if (unsupportedVmFeatures.has(feature)) {
       return {
         eligible: false,
         classification: "unsupported-feature",
-        reason: `Feature ${feature} is not supported by the VM runner.`,
+        reason: `Feature ${feature} is not supported by the VM runner on ${hostRuntime}.`,
       };
     }
-  }
-
-  if (code.includes("$262") && !metadata.features.includes("cross-realm")) {
-    return {
-      eligible: false,
-      classification: "unsupported-harness",
-      reason: "$262 harness helpers are not supported by the VM runner for this test.",
-    };
   }
 
   if (code.includes("$DONE")) {
@@ -136,8 +149,16 @@ function getVmExecutionPlan(code, metadata) {
   };
 }
 
+function canExecuteInVmHost(code, metadata, hostRuntime = "node") {
+  return getVmExecutionPlan(code, metadata, { hostRuntime }).eligible;
+}
+
 function buildVmSource(code, metadata, harnessRoot = null) {
   const sourceChunks = [];
+
+  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
+    sourceChunks.push(`"use strict";`);
+  }
 
   if (harnessRoot) {
     for (const include of metadata.includes) {
@@ -150,17 +171,13 @@ function buildVmSource(code, metadata, harnessRoot = null) {
     }
   }
 
-  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
-    sourceChunks.push(`"use strict";\n${code}`);
-    return sourceChunks.join("\n");
-  }
-
   sourceChunks.push(code);
   return sourceChunks.join("\n");
 }
 
 module.exports = {
   buildVmSource,
+  canExecuteInVmHost,
   getVmExecutionPlan,
   parseTest262Metadata,
 };

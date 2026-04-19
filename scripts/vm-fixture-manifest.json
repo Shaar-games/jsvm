@@ -38,5 +38,9 @@
   {
     "file": "modules.js",
     "logs": ["21"]
+  },
+  {
+    "file": "destructuring-params.js",
+    "logs": ["12"]
   }
 ]

@@ -119,9 +119,63 @@ assert.compareArray = function compareArrayAssert(actual, expected, message) {
   );
 };
 
-function createTest262Harness() {
+function createTest262Harness(options = {}) {
+  const abstractModuleSource = createAbstractModuleSourceIntrinsic();
+
+  function descriptorOf(obj, name) {
+    return Object.getOwnPropertyDescriptor(obj, name);
+  }
+
+  function isWritable(obj, name, verifyProp, value) {
+    const hadValue = Object.prototype.hasOwnProperty.call(obj, name);
+    const oldValue = obj[name];
+    let newValue = arguments.length > 3 ? value : "unlikelyValue";
+    if (Object.is(newValue, oldValue)) {
+      newValue = `${String(newValue)}2`;
+    }
+
+    try {
+      obj[name] = newValue;
+    } catch (error) {
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+    }
+
+    const observedKey = verifyProp || name;
+    const writeSucceeded = assert._isSameValue(obj[observedKey], newValue);
+
+    if (writeSucceeded) {
+      if (hadValue) {
+        obj[name] = oldValue;
+      } else {
+        delete obj[name];
+      }
+    }
+
+    return writeSucceeded;
+  }
+
+  function isConfigurable(obj, name) {
+    try {
+      delete obj[name];
+    } catch (error) {
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+    }
+    return !Object.prototype.hasOwnProperty.call(obj, name);
+  }
+
   function verifyProperty(obj, name, desc, options = {}) {
     const actual = Object.getOwnPropertyDescriptor(obj, name);
+    if (desc === undefined) {
+      if (actual) {
+        throw new Test262Error(`Property ${String(name)} should be absent`);
+      }
+      return;
+    }
+
     if (!actual) {
       throw new Test262Error(`Property ${String(name)} not found`);
     }
@@ -151,34 +205,22 @@ function createTest262Harness() {
   }
 
   function verifyWritable(obj, name, verifyProp, value) {
-    const oldValue = obj[name];
-    const testValue = arguments.length > 3 ? value : "unlikelyValue";
-    let writeSucceeded = true;
-    try {
-      obj[name] = testValue;
-    } catch {
-      writeSucceeded = false;
+    if (!verifyProp) {
+      const desc = descriptorOf(obj, name);
+      assert(desc && desc.writable, `Expected ${String(name)} to have writable:true.`);
     }
-    if (!writeSucceeded || !isSameValue(obj[name], testValue)) {
+    if (!isWritable(obj, name, verifyProp, value)) {
       throw new Test262Error(`Expected ${String(name)} to be writable`);
     }
-    if (verifyProp) {
-      assert.sameValue(verifyProp.value, testValue);
-    }
-    obj[name] = oldValue;
   }
 
   function verifyNotWritable(obj, name, verifyProp, value) {
-    const oldValue = obj[name];
-    const testValue = arguments.length > 3 ? value : "unlikelyValue";
-    try {
-      obj[name] = testValue;
-    } catch {}
-    if (!isSameValue(obj[name], oldValue)) {
-      throw new Test262Error(`Expected ${String(name)} to be non-writable`);
+    if (!verifyProp) {
+      const desc = descriptorOf(obj, name);
+      assert(desc && !desc.writable, `Expected ${String(name)} to have writable:false.`);
     }
-    if (verifyProp) {
-      assert.sameValue(verifyProp.value, oldValue);
+    if (isWritable(obj, name, verifyProp, value)) {
+      throw new Test262Error(`Expected ${String(name)} NOT to be writable`);
     }
   }
 
@@ -195,15 +237,17 @@ function createTest262Harness() {
   }
 
   function verifyConfigurable(obj, name) {
-    const desc = Object.getOwnPropertyDescriptor(obj, name);
-    if (!desc || !desc.configurable) {
+    const desc = descriptorOf(obj, name);
+    assert(desc && desc.configurable, `Expected ${String(name)} to have configurable:true.`);
+    if (!isConfigurable(obj, name)) {
       throw new Test262Error(`Expected ${String(name)} to be configurable`);
     }
   }
 
   function verifyNotConfigurable(obj, name) {
-    const desc = Object.getOwnPropertyDescriptor(obj, name);
-    if (!desc || desc.configurable) {
+    const desc = descriptorOf(obj, name);
+    assert(desc && !desc.configurable, `Expected ${String(name)} to have configurable:false.`);
+    if (isConfigurable(obj, name)) {
       throw new Test262Error(`Expected ${String(name)} to be non-configurable`);
     }
   }
@@ -221,6 +265,9 @@ function createTest262Harness() {
   }
 
   function createRealm() {
+    if (typeof options.createRealm === "function") {
+      return options.createRealm();
+    }
     const sandbox = {};
     const context = nodeVm.createContext(sandbox);
     const global = nodeVm.runInContext("this", context);
@@ -234,11 +281,16 @@ function createTest262Harness() {
   }
 
   const $262 = {
-    global: globalThis,
+    global: options.global || globalThis,
     createRealm,
     evalScript(source) {
+      if (typeof options.evalScript === "function") {
+        return options.evalScript(source);
+      }
       return nodeVm.runInThisContext(source);
     },
+    AbstractModuleSource: abstractModuleSource,
+    IsHTMLDDA: options.IsHTMLDDA,
     gc() {},
   };
 
@@ -248,6 +300,7 @@ function createTest262Harness() {
     assert,
     compareArray,
     verifyProperty,
+    verifyPrimordialProperty: verifyProperty,
     verifyWritable,
     verifyNotWritable,
     verifyEnumerable,
@@ -255,8 +308,57 @@ function createTest262Harness() {
     verifyConfigurable,
     verifyNotConfigurable,
     isConstructor,
+    verifyPrimordialCallableProperty: verifyCallableProperty,
     print: () => {},
   };
+}
+
+function verifyCallableProperty(obj, name, desc, options = {}) {
+  verifyProperty(obj, name, desc, options);
+  if (typeof obj[name] !== "function") {
+    throw new Test262Error(`Expected ${String(name)} to be callable`);
+  }
+}
+
+function createAbstractModuleSourceIntrinsic() {
+  function AbstractModuleSource() {
+    throw new TypeError("AbstractModuleSource cannot be constructed");
+  }
+  const prototype = {};
+
+  Object.defineProperty(prototype, Symbol.toStringTag, {
+    get() {
+      if (this === null || this === undefined || (typeof this !== "object" && typeof this !== "function")) {
+        return undefined;
+      }
+      return this.__moduleSourceClassName;
+    },
+    set: undefined,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, "constructor", {
+    value: AbstractModuleSource,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(AbstractModuleSource, "prototype", {
+    value: prototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+
+  Object.defineProperty(AbstractModuleSource, "length", {
+    value: 0,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  return AbstractModuleSource;
 }
 
 module.exports = {

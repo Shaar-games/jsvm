@@ -1,6 +1,7 @@
 // @ts-nocheck
-const { pushScope, popScope, declareRootBinding, resolveRootBindingReference } = require("../context");
-const { OpCode, emit, compileLiteralValue } = require("../utils");
+const { pushScope, popScope } = require("../context");
+const { collectAnnexBBlockFunctionNames, predeclareAnnexBRootBindings } = require("../annex-b");
+const { OpCode, emit } = require("../utils");
 
 async function compileBlockStatement(node, context, options = {}) {
   const { compileStatement } = require("../dispatch/statements");
@@ -14,22 +15,15 @@ async function compileBlockStatement(node, context, options = {}) {
   const hoistedStatements = node.body.filter((statement) => statement.type === "FunctionDeclaration");
   const remainingStatements = node.body.filter((statement) => statement.type !== "FunctionDeclaration");
 
-  if (!isFunctionBody && context.options.sourceType === "script") {
-    for (const statement of hoistedStatements) {
-      if (!statement.id || !statement.id.name) {
-        continue;
-      }
-      const rootBinding = declareRootBinding(context, statement.id.name, {
-        declarationKind: "var",
-        kind: "annexB-block-function",
-      });
-      if (!rootBinding.created) {
-        continue;
-      }
-      const rootReference = resolveRootBindingReference(context, statement.id.name);
-      const undefinedRegister = compileLiteralValue(undefined, context);
-      emit(context, [OpCode.INITVAR, rootReference.depth, rootReference.binding.slot, undefinedRegister]);
-    }
+  if (context.options.sourceType === "script") {
+    const names = isFunctionBody
+      ? collectAnnexBBlockFunctionNames(node.body)
+      : new Set(
+          hoistedStatements
+            .filter((statement) => statement.id && statement.id.name)
+            .map((statement) => statement.id.name)
+        );
+    predeclareAnnexBRootBindings(context, names);
   }
 
   for (const statement of hoistedStatements) {

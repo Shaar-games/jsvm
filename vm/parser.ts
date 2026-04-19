@@ -8,10 +8,19 @@ function parseBytecode(bytecode) {
       labels.set(line[0].slice(0, -1), instructions.length);
       continue;
     }
-    instructions.push(line);
+    defineOwnArrayElement(instructions, line);
   }
 
   return { instructions, labels };
+}
+
+function defineOwnArrayElement(array, value) {
+  Object.defineProperty(array, array.length, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function buildFunctionTable(functions, table = new Map()) {

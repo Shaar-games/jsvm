@@ -2,12 +2,12 @@
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
 const { withAnnexBBlockFunctionContext } = require("../annex-b");
-const { OpCode, emit, emitLabel, makeLabel } = require("../utils");
+const { OpCode, emit, emitLabel, makeLabel, popControlLabel, pushControlLabel } = require("../utils");
 
 async function compileForStatement(node, context) {
   const startLabel = makeLabel(context);
   const endLabel = makeLabel(context);
-  context.loopLabels.push({ start: startLabel, end: endLabel });
+  pushControlLabel(context, { continueLabel: startLabel, breakLabel: endLabel });
 
   if (node.init) {
     if (node.init.type.endsWith("Declaration")) {
@@ -32,7 +32,7 @@ async function compileForStatement(node, context) {
   emit(context, [OpCode.JUMP, startLabel]);
   emitLabel(context, endLabel);
 
-  context.loopLabels.pop();
+  popControlLabel(context);
 }
 
 module.exports = compileForStatement;

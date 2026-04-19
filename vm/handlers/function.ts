@@ -71,10 +71,12 @@ async function handleFunction(vm, state, instruction) {
       const [, destRegister, functionId] = instruction;
       const functionMeta = vm.functionTable.get(functionId);
       const capturedEnvs = state.envStack.slice();
+      const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
       const lexicalThis = state.thisValue;
       const runClosure = (thisArg, callArgs) => {
         const nextState = {
           envStack: [createEnvironment(), ...capturedEnvs],
+          bindingNameStack: [functionMeta.scopeBindings || {}, ...capturedBindingNames],
           registers: createRegisters(),
           thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : thisArg,
           tryStack: [],
@@ -86,6 +88,7 @@ async function handleFunction(vm, state, instruction) {
       const runClosureSync = (thisArg, callArgs) => {
         const nextState = {
           envStack: [createEnvironment(), ...capturedEnvs],
+          bindingNameStack: [functionMeta.scopeBindings || {}, ...capturedBindingNames],
           registers: createRegisters(),
           thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : thisArg,
           tryStack: [],
@@ -201,7 +204,7 @@ async function handleFunction(vm, state, instruction) {
       }
       Klass.prototype.constructor = Klass;
       Klass.__jsvmClass = true;
-      Klass.__jsvmConstruct = async (instance, ctorArgs) => {
+      Klass.__jsvmConstructSync = (instance, ctorArgs) => {
         if (superClass) {
           Reflect.apply(superClass, instance, ctorArgs);
         }
@@ -210,6 +213,7 @@ async function handleFunction(vm, state, instruction) {
         }
         return undefined;
       };
+      Klass.__jsvmConstruct = async (instance, ctorArgs) => Klass.__jsvmConstructSync(instance, ctorArgs);
       state.setRegister(destRegister, Klass);
       return null;
     }
@@ -260,10 +264,12 @@ module.exports = {
         const [, destRegister, functionId] = instruction;
         const functionMeta = vm.functionTable.get(functionId);
         const capturedEnvs = state.envStack.slice();
+        const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
         const lexicalThis = state.thisValue;
         const runClosure = (thisArg, callArgs) => {
           const nextState = {
             envStack: [createEnvironment(), ...capturedEnvs],
+            bindingNameStack: [functionMeta.scopeBindings || {}, ...capturedBindingNames],
             registers: createRegisters(),
             thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : thisArg,
             tryStack: [],
@@ -275,6 +281,7 @@ module.exports = {
         const runClosureSync = (thisArg, callArgs) => {
           const nextState = {
             envStack: [createEnvironment(), ...capturedEnvs],
+            bindingNameStack: [functionMeta.scopeBindings || {}, ...capturedBindingNames],
             registers: createRegisters(),
             thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : thisArg,
             tryStack: [],

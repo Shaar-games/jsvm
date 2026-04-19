@@ -4,21 +4,22 @@ const { compileStatement } = require("../dispatch/statements");
 const { withAnnexBBlockFunctionContext } = require("../annex-b");
 const { OpCode, emit, emitLabel, makeLabel, popControlLabel, pushControlLabel } = require("../utils");
 
-async function compileWhileStatement(node, context) {
-  const startLabel = makeLabel(context);
-  const endLabel = makeLabel(context);
-  pushControlLabel(context, { continueLabel: startLabel, breakLabel: endLabel });
+async function compileDoWhileStatement(node, context) {
+  const startLabel = makeLabel(context, "DO_WHILE_START");
+  const continueLabel = makeLabel(context, "DO_WHILE_CONTINUE");
+  const endLabel = makeLabel(context, "DO_WHILE_END");
+  pushControlLabel(context, { continueLabel, breakLabel: endLabel });
 
   emitLabel(context, startLabel);
-  const testRegister = await compileExpression(node.test, context);
-  emit(context, [OpCode.JUMPF, testRegister, endLabel]);
   await withAnnexBBlockFunctionContext(context, () => compileStatement(node.body, context));
-  emit(context, [OpCode.JUMP, startLabel]);
+  emitLabel(context, continueLabel);
+  const testRegister = await compileExpression(node.test, context);
+  emit(context, [OpCode.JUMPT, testRegister, startLabel]);
   emitLabel(context, endLabel);
 
   popControlLabel(context);
 }
 
-module.exports = compileWhileStatement;
+module.exports = compileDoWhileStatement;
 
 export {};

@@ -41,6 +41,7 @@ The expected architecture is:
 - Do not reintroduce the old `frame` abstraction now that `registers` and `environment` are explicit modules.
 - The long-term target is a complete execution system: local code loaded through `import` or `require` should be compiled and then executed by the VM, not bypassed through host evaluation.
 - Test harness code should be compiled through the same pipeline whenever practical; keep runtime-only helpers limited to cases that cannot yet be expressed through the compiler/VM.
+- `eval` currently prefers the real host `eval` function. Keep that mode unless the user explicitly asks to revert it.
 
 ## Opcode guidance
 

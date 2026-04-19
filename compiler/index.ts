@@ -2,7 +2,7 @@
 const acorn = require("acorn");
 const util = require("util");
 const { OpCode, DATA } = require("../bytecode/opcodes");
-const { createContext, serializeFunctions } = require("./context");
+const { createContext, serializeFunctions, serializeScopeBindings } = require("./context");
 const { compileBlockStatement } = require("./statements/BlockStatement");
 
 const expressionHandlers = {
@@ -40,6 +40,7 @@ const statementHandlers = {
   ReturnStatement: require("./statements/ReturnStatement"),
   IfStatement: require("./statements/IfStatement"),
   WhileStatement: require("./statements/WhileStatement"),
+  DoWhileStatement: require("./statements/DoWhileStatement"),
   ForStatement: require("./statements/ForStatement"),
   ForOfStatement: require("./statements/ForOfStatement"),
   ForInStatement: require("./statements/ForInStatement"),
@@ -52,6 +53,7 @@ const statementHandlers = {
   TryStatement: require("./statements/TryStatement"),
   ExportDefaultDeclaration: require("./statements/ExportDefaultDeclaration"),
   SwitchStatement: require("./statements/SwitchStatement"),
+  LabeledStatement: require("./statements/LabeledStatement"),
 };
 
 async function compileProgram(code, options = {}) {
@@ -74,6 +76,7 @@ async function compileProgram(code, options = {}) {
     sourceType,
     scriptMode: context.options.scriptMode,
     filename,
+    scopeBindings: serializeScopeBindings(context.scopeStack[0]),
     staticSection: {
       values: context.staticSection.values.slice(),
     },

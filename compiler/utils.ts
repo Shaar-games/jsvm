@@ -10,10 +10,15 @@ const {
   getRegister,
   makeLabel,
   newRegister,
+  popControlLabel,
+  pushControlLabel,
+  resolveBreakTarget,
   registerCompiledFunction,
   resolveBindingReference,
+  resolveContinueTarget,
   resolveIdentifier,
 } = require("./context");
+const { collectPatternBindingNames } = require("./pattern-bindings");
 
 function compileLiteralValue(value, context) {
   const register = newRegister(context);
@@ -38,6 +43,7 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
   functionContext.thisMode = node.type === "ArrowFunctionExpression" ? "lexical" : "dynamic";
   const params = [];
   const paramSetup = [];
+  let syntheticParamCounter = 0;
 
   for (let index = 0; index < node.params.length; index += 1) {
     const param = node.params[index];
@@ -75,6 +81,62 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
       continue;
     }
 
+    if (
+      param.type === "ArrayPattern" ||
+      param.type === "ObjectPattern" ||
+      (param.type === "AssignmentPattern" &&
+        (param.left.type === "ArrayPattern" || param.left.type === "ObjectPattern")) ||
+      (param.type === "RestElement" &&
+        (param.argument.type === "ArrayPattern" || param.argument.type === "ObjectPattern"))
+    ) {
+      const syntheticName = `[[param${syntheticParamCounter}]]`;
+      syntheticParamCounter += 1;
+      params.push(syntheticName);
+      const binding = declareBinding(functionContext, syntheticName, {
+        kind: "param",
+        declarationKind: "param",
+        internal: true,
+      });
+
+      const declaredNames = collectPatternBindingNames(
+        param.type === "AssignmentPattern" ? param.left : (param.type === "RestElement" ? param.argument : param)
+      );
+      for (const declaredName of declaredNames) {
+        declareBinding(functionContext, declaredName, {
+          kind: "param-pattern",
+          declarationKind: "param",
+        });
+      }
+
+      if (param.type === "RestElement") {
+        functionContext.restBinding = {
+          name: syntheticName,
+          slot: binding.slot,
+          depth: 0,
+          index,
+        };
+        paramSetup.push({
+          type: "pattern",
+          sourceName: syntheticName,
+          pattern: param.argument,
+        });
+      } else if (param.type === "AssignmentPattern") {
+        paramSetup.push({
+          type: "pattern-default",
+          sourceName: syntheticName,
+          pattern: param.left,
+          defaultExpression: param.right,
+        });
+      } else {
+        paramSetup.push({
+          type: "pattern",
+          sourceName: syntheticName,
+          pattern: param,
+        });
+      }
+      continue;
+    }
+
     throw new Error(`Unsupported parameter type: ${param.type}`);
   }
 
@@ -92,15 +154,35 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
     }
   }
 
-  const functionId = registerCompiledFunction(
-    context,
-    node,
-    functionContext,
-    functionName,
-    params
-  );
-
   for (const setup of paramSetup) {
+    if (setup.type === "pattern" || setup.type === "pattern-default") {
+      const { initializePattern } = require("./patterns");
+      const reference = resolveBindingReference(functionContext, setup.sourceName);
+      const currentValue = newRegister(functionContext);
+      emit(functionContext, [OpCode.LOADVAR, currentValue, reference.depth, reference.binding.slot]);
+      let patternValueRegister = currentValue;
+
+      if (setup.type === "pattern-default") {
+        const undefinedRegister = compileLiteralValue(undefined, functionContext);
+        const testRegister = newRegister(functionContext);
+        const resolvedRegister = newRegister(functionContext);
+        const useDefaultLabel = makeLabel(functionContext, "PARAM_PATTERN_DEFAULT");
+        const doneLabel = makeLabel(functionContext, "PARAM_PATTERN_DONE");
+        emit(functionContext, [OpCode.ISEQ, testRegister, currentValue, undefinedRegister]);
+        emit(functionContext, [OpCode.JUMPT, testRegister, useDefaultLabel]);
+        emit(functionContext, [OpCode.MOVE, resolvedRegister, currentValue]);
+        emit(functionContext, [OpCode.JUMP, doneLabel]);
+        emitLabel(functionContext, useDefaultLabel);
+        const defaultRegister = await compileExpressionInContext(setup.defaultExpression, functionContext);
+        emit(functionContext, [OpCode.MOVE, resolvedRegister, defaultRegister]);
+        emitLabel(functionContext, doneLabel);
+        patternValueRegister = resolvedRegister;
+      }
+
+      await initializePattern(setup.pattern, functionContext, patternValueRegister, "param");
+      continue;
+    }
+
     const reference = resolveBindingReference(functionContext, setup.param.left.name);
     const currentValue = newRegister(functionContext);
     emit(functionContext, [OpCode.LOADVAR, currentValue, reference.depth, reference.binding.slot]);
@@ -118,6 +200,14 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
   }
 
   await bodyHandler(functionContext);
+
+  const functionId = registerCompiledFunction(
+    context,
+    node,
+    functionContext,
+    functionName,
+    params
+  );
 
   const targetRegister = newRegister(context);
   emit(context, [OpCode.CLOSURE, targetRegister, functionId]);
@@ -183,7 +273,11 @@ module.exports = {
   loadBindingValue,
   makeLabel,
   newRegister,
+  popControlLabel,
+  pushControlLabel,
+  resolveBreakTarget,
   resolveIdentifier,
+  resolveContinueTarget,
   storeBindingValue,
 };
 

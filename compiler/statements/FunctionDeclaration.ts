@@ -1,10 +1,12 @@
 // @ts-nocheck
 const { compileBlockStatement } = require("./BlockStatement");
 const { compileFunctionLike, initializeBinding } = require("../utils");
+const { canExposeAnnexBBlockFunction } = require("../annex-b");
 const {
   emitStoreGlobalBinding,
   emitStoreRootBinding,
   shouldExposeFunctionToGlobal,
+  shouldExposeFunctionToRoot,
 } = require("../script-bindings");
 
 async function compileFunctionDeclaration(node, context) {
@@ -18,9 +20,12 @@ async function compileFunctionDeclaration(node, context) {
   );
 
   initializeBinding(context, node.id.name, closureRegister, { declarationKind: "function" });
+  const canExposeAnnexB = canExposeAnnexBBlockFunction(context, node.id.name);
 
-  if (shouldExposeFunctionToGlobal(context) && (context.scopeStack.length > 1 || context.annexBBlockFunctionContext || context.options.scriptMode === "global")) {
+  if (canExposeAnnexB && shouldExposeFunctionToRoot(context) && (context.scopeStack.length > 1 || context.annexBBlockFunctionContext || context.options.scriptMode === "global")) {
     emitStoreRootBinding(context, node.id.name, closureRegister);
+  }
+  if (canExposeAnnexB && shouldExposeFunctionToGlobal(context) && (context.scopeStack.length > 1 || context.annexBBlockFunctionContext || context.options.scriptMode === "global")) {
     emitStoreGlobalBinding(context, node.id.name, closureRegister);
   }
 }

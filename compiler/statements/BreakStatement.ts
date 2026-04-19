@@ -1,11 +1,12 @@
 // @ts-nocheck
-const { OpCode, emit } = require("../utils");
+const { OpCode, emit, resolveBreakTarget } = require("../utils");
 
 async function compileBreakStatement(node, context) {
-  if (context.loopLabels.length === 0) {
+  const breakTarget = resolveBreakTarget(context, node.label ? node.label.name : null);
+  if (!breakTarget) {
     throw new Error("BreakStatement used outside of a loop");
   }
-  emit(context, [OpCode.JUMP, context.loopLabels[context.loopLabels.length - 1].end]);
+  emit(context, [OpCode.JUMP, breakTarget]);
 }
 
 module.exports = compileBreakStatement;

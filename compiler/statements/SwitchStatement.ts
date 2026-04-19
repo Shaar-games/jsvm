@@ -2,7 +2,7 @@
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
 const { withAnnexBBlockFunctionContext } = require("../annex-b");
-const { OpCode, emit, emitLabel, makeLabel, newRegister } = require("../utils");
+const { OpCode, emit, emitLabel, makeLabel, newRegister, popControlLabel, pushControlLabel } = require("../utils");
 
 async function compileSwitchStatement(node, context) {
   const discriminantRegister = await compileExpression(node.discriminant, context);
@@ -11,7 +11,7 @@ async function compileSwitchStatement(node, context) {
   const defaultIndex = node.cases.findIndex((caseNode) => caseNode.test === null);
   const defaultLabel = defaultIndex >= 0 ? caseLabels[defaultIndex] : endLabel;
 
-  context.loopLabels.push({ start: endLabel, end: endLabel });
+  pushControlLabel(context, { breakLabel: endLabel });
 
   for (let index = 0; index < node.cases.length; index += 1) {
     const caseNode = node.cases[index];
@@ -34,7 +34,7 @@ async function compileSwitchStatement(node, context) {
   }
 
   emitLabel(context, endLabel);
-  context.loopLabels.pop();
+  popControlLabel(context);
 }
 
 module.exports = compileSwitchStatement;

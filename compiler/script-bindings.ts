@@ -7,6 +7,10 @@ function isScriptMode(context, mode) {
 }
 
 function shouldExposeFunctionToGlobal(context) {
+  return isScriptMode(context, "global");
+}
+
+function shouldExposeFunctionToRoot(context) {
   return isScriptMode(context, "global") || isScriptMode(context, "eval");
 }
 
@@ -29,6 +33,7 @@ module.exports = {
   emitStoreGlobalBinding,
   emitStoreRootBinding,
   shouldExposeFunctionToGlobal,
+  shouldExposeFunctionToRoot,
   shouldExposeVarToGlobal,
 };
 

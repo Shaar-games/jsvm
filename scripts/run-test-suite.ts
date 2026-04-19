@@ -2,11 +2,11 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { Worker } = require("worker_threads");
+const { fork } = require("child_process");
 const { compileProgram } = require("../compiler/index");
 const { executeCompiledProgram } = require("../vm/index");
 const { findWorkspaceRoot } = require("./paths");
-const { parseTest262Metadata } = require("./test262-metadata");
+const { canExecuteInVmHost, parseTest262Metadata } = require("./test262-metadata");
 
 const workspaceRoot = findWorkspaceRoot(__dirname);
 const reportsDir = path.join(workspaceRoot, "reports");
@@ -18,11 +18,14 @@ const vmManifest = require(path.join(workspaceRoot, "scripts", "vm-fixture-manif
 const args = new Set(process.argv.slice(2));
 const filterArg = process.argv.slice(2).find((arg) => arg.startsWith("--filter="));
 const limitArg = process.argv.slice(2).find((arg) => arg.startsWith("--limit="));
+const workerChunkArg = process.argv.slice(2).find((arg) => arg.startsWith("--worker-chunk="));
 const testFilter = filterArg ? filterArg.slice("--filter=".length).toLowerCase() : "";
 const testLimit = limitArg ? Number(limitArg.slice("--limit=".length)) : null;
 const failFast = args.has("--fail-fast");
 const workersArg = process.argv.slice(2).find((arg) => arg.startsWith("--workers="));
 const requestedWorkers = workersArg ? Number(workersArg.slice("--workers=".length)) : null;
+const requestedWorkerChunk = workerChunkArg ? Number(workerChunkArg.slice("--worker-chunk=".length)) : null;
+const vmHostRuntime = "node";
 
 function now() {
   return new Date().toISOString();
@@ -234,6 +237,85 @@ async function runVmExecutionSuite() {
   return results;
 }
 
+function chunkFiles(files, chunkSize) {
+  if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
+    return [files];
+  }
+
+  const chunks = [];
+  for (let index = 0; index < files.length; index += chunkSize) {
+    chunks.push(files.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function runWorkerBatch(workerPath, batch, mode) {
+  return new Promise((resolve, reject) => {
+    const worker = fork(workerPath, [], {
+      cwd: workspaceRoot,
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+      env: {
+        ...process.env,
+        JSVM_WORKER_DATA: JSON.stringify({
+          files: batch,
+          workspaceRoot,
+          test262TestRoot,
+          mode,
+        }),
+      },
+    });
+
+    worker.on("message", (message) => {
+      if (message.type === "done") {
+        worker.disconnect();
+        resolve(message.results);
+        return;
+      }
+
+      if (message.type === "error") {
+        reject(new Error(message.error));
+      }
+    });
+
+    worker.on("error", reject);
+    worker.on("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Worker exited with code ${code}`));
+      }
+    });
+  });
+}
+
+function buildWorkerCrashResult(file, mode, error) {
+  const relativeFile = path.relative(workspaceRoot, file);
+  const testId = path.relative(test262TestRoot, file);
+  const message = getErrorMessage(error);
+
+  if (mode === "compile") {
+    return {
+      id: testId,
+      suite: "test262-compiler",
+      status: "failed",
+      expected: "pass",
+      file: relativeFile,
+      durationMs: 0,
+      classification: "worker-crash",
+      error: message,
+    };
+  }
+
+  return {
+    id: testId,
+    suite: "test262-vm",
+    status: "failed",
+    expected: "pass",
+    file: relativeFile,
+    durationMs: 0,
+    classification: "worker-crash",
+    error: message,
+  };
+}
+
 async function runWorkerSuite(suiteName, files, mode) {
   if (files.length === 0) {
     return [];
@@ -246,52 +328,72 @@ async function runWorkerSuite(suiteName, files, mode) {
     requestedWorkers || Math.max(1, Math.min(cpuCount - 1, 8)),
     files.length
   ));
-  const batches = Array.from({ length: workerCount }, () => []);
+  const defaultChunkSize = mode === "vm" ? 50 : 250;
+  const chunkSize = Math.max(1, requestedWorkerChunk || defaultChunkSize);
+  const batches = chunkFiles(files, chunkSize);
 
-  files.forEach((file, index) => {
-    batches[index % workerCount].push(file);
-  });
-
-  console.log(`Parallel ${suiteName} run: ${files.length} files across ${workerCount} workers`);
+  console.log(
+    `Parallel ${suiteName} run: ${files.length} files across ${workerCount} workers (${batches.length} batches, chunk=${chunkSize})`
+  );
 
   const workerPath = path.join(__dirname, "test-worker.js");
+
+  if (failFast) {
+    console.log(`Fail-fast ${suiteName} run: ${files.length} files`);
+    const results = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      try {
+        const batchResults = await runWorkerBatch(workerPath, [file], mode);
+        results.push(...batchResults);
+      } catch (error) {
+        results.push(buildWorkerCrashResult(file, mode, error));
+      }
+
+      console.log(`Progress: ${index + 1}/${files.length}`);
+      const lastResult = results[results.length - 1];
+      if (lastResult && lastResult.status === "failed") {
+        break;
+      }
+    }
+
+    results.sort((left, right) => left.id.localeCompare(right.id));
+    return results;
+  }
+
   const results = [];
   let completed = 0;
+  const queue = batches.slice().reverse();
+
+  async function consumeBatches() {
+    while (queue.length > 0) {
+      const batch = queue.pop();
+      if (!batch || batch.length === 0) {
+        continue;
+      }
+
+      try {
+        const batchResults = await runWorkerBatch(workerPath, batch, mode);
+        results.push(...batchResults);
+        completed += batch.length;
+        console.log(`Progress: ${completed}/${files.length}`);
+      } catch (error) {
+        if (batch.length === 1) {
+          results.push(buildWorkerCrashResult(batch[0], mode, error));
+          completed += 1;
+          console.log(`Progress: ${completed}/${files.length}`);
+          continue;
+        }
+
+        const midpoint = Math.floor(batch.length / 2);
+        queue.push(batch.slice(midpoint));
+        queue.push(batch.slice(0, midpoint));
+      }
+    }
+  }
 
   await Promise.all(
-    batches
-      .filter((batch) => batch.length > 0)
-      .map((batch) => new Promise((resolve, reject) => {
-        const worker = new Worker(workerPath, {
-          workerData: {
-            files: batch,
-            workspaceRoot,
-            test262TestRoot,
-            mode,
-          },
-        });
-
-        worker.on("message", (message) => {
-          if (message.type === "done") {
-            results.push(...message.results);
-            completed += batch.length;
-            console.log(`Progress: ${completed}/${files.length}`);
-            resolve(null);
-            return;
-          }
-
-          if (message.type === "error") {
-            reject(new Error(message.error));
-          }
-        });
-
-        worker.on("error", reject);
-        worker.on("exit", (code) => {
-          if (code !== 0) {
-            reject(new Error(`Worker exited with code ${code}`));
-          }
-        });
-      }))
+    Array.from({ length: Math.min(workerCount, batches.length) }, () => consumeBatches())
   );
 
   results.sort((left, right) => left.id.localeCompare(right.id));
@@ -382,9 +484,25 @@ async function runTest262CompilerSuite() {
   return runWorkerSuite("test262-compiler", files, "compile");
 }
 
-async function runTest262VmSuite() {
-  const files = walkJsFiles(test262TestRoot);
-  return runWorkerSuite("test262-vm", files, "vm");
+async function runTest262VmSuite(filesOverride) {
+  const files = filesOverride || walkJsFiles(test262TestRoot);
+  const eligibleFiles = [];
+  let skippedForHost = 0;
+
+  for (const fullPath of files) {
+    const code = fs.readFileSync(fullPath, "utf8");
+    const metadata = parseTest262Metadata(code);
+    if (!canExecuteInVmHost(code, metadata, vmHostRuntime)) {
+      skippedForHost += 1;
+      continue;
+    }
+    eligibleFiles.push(fullPath);
+  }
+
+  if (skippedForHost > 0) {
+    console.log(`Filtered ${skippedForHost} test262 VM files not compatible with ${vmHostRuntime} host runtime.`);
+  }
+  return runWorkerSuite("test262-vm", eligibleFiles, "vm");
 }
 
 function summarize(results) {
@@ -435,16 +553,18 @@ function summarize(results) {
     }
 
     summary.test262Metrics = {
+      hasCompileRun: compileResults.length > 0,
+      hasVmRun: vmResults.length > 0,
       totalTests: compileResults.length || vmResults.length,
       compilePassed: compileResults.filter((result) => result.status === "passed").length,
       compileFailed: compileResults.filter((result) => result.status === "failed").length,
       vmPassed: vmResults.filter((result) => result.status === "passed").length,
       vmFailed: vmResults.filter((result) => result.status === "failed").length,
       vmUnsupported: vmResults.filter((result) => result.status === "unsupported").length,
-      vmPassVsTotal: (compileResults.length || vmResults.length) > 0
+      vmPassVsTotal: vmResults.length > 0 && (compileResults.length || vmResults.length) > 0
         ? vmResults.filter((result) => result.status === "passed").length / (compileResults.length || vmResults.length)
         : null,
-      vmPassVsCompilable: compileResults.length > 0 && compilePassedIds.size > 0
+      vmPassVsCompilable: vmResults.length > 0 && compileResults.length > 0 && compilePassedIds.size > 0
         ? vmPassedAmongCompilable / compilePassedIds.size
         : null,
       compileCoverage: compileResults.length > 0
@@ -521,9 +641,9 @@ function renderHtml(report) {
         <tr>
           <td>${report.summary.test262Metrics.totalTests}</td>
           <td>${report.summary.test262Metrics.compilePassed}</td>
-          <td>${report.summary.test262Metrics.vmPassed}</td>
-          <td>${report.summary.test262Metrics.vmFailed}</td>
-          <td>${report.summary.test262Metrics.vmUnsupported}</td>
+          <td>${report.summary.test262Metrics.hasVmRun ? report.summary.test262Metrics.vmPassed : "n/a"}</td>
+          <td>${report.summary.test262Metrics.hasVmRun ? report.summary.test262Metrics.vmFailed : "n/a"}</td>
+          <td>${report.summary.test262Metrics.hasVmRun ? report.summary.test262Metrics.vmUnsupported : "n/a"}</td>
           <td>${formatPercent(report.summary.test262Metrics.compileCoverage)}</td>
           <td>${formatPercent(report.summary.test262Metrics.vmPassVsTotal)}</td>
           <td>${formatPercent(report.summary.test262Metrics.vmPassVsCompilable)}</td>
@@ -710,10 +830,16 @@ function printSummary(report) {
   if (report.summary.test262Metrics) {
     const metrics = report.summary.test262Metrics;
     console.log("test262 metrics:");
-    console.log(` - compile coverage: ${formatPercent(metrics.compileCoverage)} (${metrics.compilePassed}/${metrics.totalTests})`);
-    console.log(` - VM pass vs total: ${formatPercent(metrics.vmPassVsTotal)} (${metrics.vmPassed}/${metrics.totalTests})`);
-    console.log(` - VM pass vs compilable: ${formatPercent(metrics.vmPassVsCompilable)} (${metrics.vmPassedAmongCompilable}/${metrics.compilePassed || 0})`);
-    if (metrics.vmUnsupported > 0) {
+    if (metrics.hasCompileRun) {
+      console.log(` - compile coverage: ${formatPercent(metrics.compileCoverage)} (${metrics.compilePassed}/${metrics.totalTests})`);
+    }
+    if (metrics.hasVmRun) {
+      console.log(` - VM pass vs total: ${formatPercent(metrics.vmPassVsTotal)} (${metrics.vmPassed}/${metrics.totalTests})`);
+      console.log(` - VM pass vs compilable: ${formatPercent(metrics.vmPassVsCompilable)} (${metrics.vmPassedAmongCompilable}/${metrics.compilePassed || 0})`);
+    } else {
+      console.log(" - VM metrics: not available in compile-only run");
+    }
+    if (metrics.hasVmRun && metrics.vmUnsupported > 0) {
       console.log(` - VM unsupported: ${metrics.vmUnsupported}`);
     }
   }
@@ -740,6 +866,7 @@ async function main() {
   }
 
   const results = [];
+  let compileResults = [];
 
   if (!args.has("--no-local")) {
     results.push(...(await runLocalCompilerSuite()));
@@ -750,11 +877,17 @@ async function main() {
   }
 
   if (wantsTest262Compiler) {
-    results.push(...(await runTest262CompilerSuite()));
+    compileResults = await runTest262CompilerSuite();
+    results.push(...compileResults);
   }
 
   if (wantsTest262Vm) {
-    results.push(...(await runTest262VmSuite()));
+    const vmFiles = compileResults.length > 0
+      ? compileResults
+          .filter((result) => result.status === "passed" && result.expected === "pass")
+          .map((result) => path.join(workspaceRoot, result.file))
+      : null;
+    results.push(...(await runTest262VmSuite(vmFiles)));
   }
 
   const report = {

@@ -24,17 +24,17 @@ function createScope(parent = null) {
 }
 
 function createContext(options = {}) {
-  const rootScope = createScope(null);
+  const scopeStack = buildInitialScopeStack(options);
   return {
     options,
     bytecode: createBytecodeBuffer(),
     staticSection: options.staticSection || { values: [], indexByKey: new Map() },
-    scopeStack: [rootScope],
+    scopeStack,
     nextRegister: 0,
     labelCounter: 0,
     functionCounter: options.functionCounter || { value: 0 },
     functions: new Map(),
-    loopLabels: [],
+    controlLabels: [],
   };
 }
 
@@ -50,15 +50,90 @@ function createChildContext(parentContext, options = {}) {
     labelCounter: 0,
     functionCounter: parentContext.functionCounter,
     functions: new Map(),
-    loopLabels: [],
+    controlLabels: [],
     functionName: options.functionName || null,
     expressionHandlers: parentContext.expressionHandlers,
     statementHandlers: parentContext.statementHandlers,
   };
 }
 
+function pushControlLabel(context, labelState) {
+  context.controlLabels.push(labelState);
+  return labelState;
+}
+
+function popControlLabel(context) {
+  return context.controlLabels.pop();
+}
+
+function resolveBreakTarget(context, labelName = null) {
+  for (let index = context.controlLabels.length - 1; index >= 0; index -= 1) {
+    const state = context.controlLabels[index];
+    if (labelName && state.label !== labelName) {
+      continue;
+    }
+    if (!state.breakLabel) {
+      continue;
+    }
+    return state.breakLabel;
+  }
+  return null;
+}
+
+function resolveContinueTarget(context, labelName = null) {
+  for (let index = context.controlLabels.length - 1; index >= 0; index -= 1) {
+    const state = context.controlLabels[index];
+    if (labelName && state.label !== labelName) {
+      continue;
+    }
+    if (!state.continueLabel) {
+      continue;
+    }
+    return state.continueLabel;
+  }
+  return null;
+}
+
 function currentScope(context) {
   return context.scopeStack[context.scopeStack.length - 1];
+}
+
+function buildInitialScopeStack(options = {}) {
+  if (Array.isArray(options.predeclaredScopeStack) && options.predeclaredScopeStack.length > 0) {
+    return createScopeStackFromBindings(options.predeclaredScopeStack);
+  }
+
+  const rootScope = createScope(null);
+  applyPredeclaredBindings(rootScope, options.predeclaredRootBindings);
+  return [rootScope];
+}
+
+function createScopeStackFromBindings(bindingStack) {
+  const scopes = [];
+  const reversed = bindingStack.slice().reverse();
+  let parent = null;
+
+  for (const bindings of reversed) {
+    const scope = createScope(parent);
+    applyPredeclaredBindings(scope, bindings);
+    scopes.push(scope);
+    parent = scope;
+  }
+
+  return scopes.length > 0 ? scopes : [createScope(null)];
+}
+
+function applyPredeclaredBindings(scope, bindings = null) {
+  if (!bindings) {
+    return;
+  }
+
+  let nextSlot = scope.nextSlot;
+  for (const [name, binding] of Object.entries(bindings)) {
+    scope.bindings.set(name, { name, ...binding });
+    nextSlot = Math.max(nextSlot, (binding.slot || 0) + 1);
+  }
+  scope.nextSlot = nextSlot;
 }
 
 function pushScope(context) {
@@ -247,6 +322,7 @@ function registerCompiledFunction(context, node, functionContext, functionName, 
     }),
     argumentsBinding: functionContext.argumentsBinding || null,
     restBinding: functionContext.restBinding || null,
+    scopeBindings: serializeScopeBindings(functionContext.scopeStack[functionContext.scopeStack.length - 1]),
     thisMode: functionContext.thisMode || "dynamic",
     isAsync: Boolean(node.async),
     bytecode: functionContext.bytecode,
@@ -257,6 +333,19 @@ function registerCompiledFunction(context, node, functionContext, functionName, 
   return functionId;
 }
 
+function serializeScopeBindings(scope) {
+  const entries = {};
+  for (const [name, binding] of scope.bindings.entries()) {
+    entries[name] = {
+      slot: binding.slot,
+      kind: binding.kind,
+      declarationKind: binding.declarationKind,
+      internal: Boolean(binding.internal),
+    };
+  }
+  return entries;
+}
+
 function serializeFunctions(functions) {
   return Array.from(functions.values()).map((func) => ({
     id: func.id,
@@ -265,6 +354,7 @@ function serializeFunctions(functions) {
     paramBindings: func.paramBindings,
     argumentsBinding: func.argumentsBinding,
     restBinding: func.restBinding,
+    scopeBindings: func.scopeBindings || {},
     thisMode: func.thisMode,
     isAsync: Boolean(func.isAsync),
     bytecode: func.bytecode.array.slice(),
@@ -286,13 +376,18 @@ module.exports = {
   getRegister,
   makeLabel,
   newRegister,
+  popControlLabel,
+  pushControlLabel,
+  resolveBreakTarget,
   resolveBindingReference,
+  resolveContinueTarget,
   resolveRootBindingReference,
   popScope,
   pushScope,
   registerCompiledFunction,
   resolveBinding,
   resolveIdentifier,
+  serializeScopeBindings,
   serializeFunctions,
 };
 

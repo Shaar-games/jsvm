@@ -20,7 +20,12 @@ function setRegister(registers, registerName, value) {
   if (index === null) {
     throw new Error(`Invalid register name: ${registerName}`);
   }
-  registers[index] = value;
+  Object.defineProperty(registers, index, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   return value;
 }
 

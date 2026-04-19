@@ -8,8 +8,65 @@ const {
   initializeBinding,
   storeBindingValue,
 } = require("./utils");
+const { collectPatternBindingNames } = require("./pattern-bindings");
 
-async function assignObjectPattern(patternNode, context, sourceRegister, assignValue) {
+async function assignPatternNode(patternNode, context, sourceRegister, handlers) {
+  if (!patternNode) {
+    return;
+  }
+
+  if (patternNode.type === "Identifier") {
+    handlers.assignIdentifier(patternNode.name, sourceRegister);
+    return;
+  }
+
+  if (patternNode.type === "MemberExpression") {
+    if (typeof handlers.assignMemberExpression !== "function") {
+      throw new Error(`Unsupported pattern element: ${patternNode.type}`);
+    }
+    await handlers.assignMemberExpression(patternNode, sourceRegister);
+    return;
+  }
+
+  if (patternNode.type === "AssignmentPattern") {
+    const undefinedRegister = compileLiteralValue(undefined, context);
+    const testRegister = newRegister(context);
+    const resolvedRegister = newRegister(context);
+    const useDefaultLabel = `L${context.labelCounter + 1}`;
+    const doneLabel = `L${context.labelCounter + 2}`;
+    context.labelCounter += 2;
+
+    emit(context, [OpCode.ISEQ, testRegister, sourceRegister, undefinedRegister]);
+    emit(context, [OpCode.JUMPT, testRegister, useDefaultLabel]);
+    emit(context, [OpCode.MOVE, resolvedRegister, sourceRegister]);
+    emit(context, [OpCode.JUMP, doneLabel]);
+    emit(context, [`${useDefaultLabel}:`]);
+    const defaultRegister = await compileExpression(patternNode.right, context);
+    emit(context, [OpCode.MOVE, resolvedRegister, defaultRegister]);
+    emit(context, [`${doneLabel}:`]);
+    await assignPatternNode(patternNode.left, context, resolvedRegister, handlers);
+    return;
+  }
+
+  if (patternNode.type === "ObjectPattern") {
+    await assignObjectPattern(patternNode, context, sourceRegister, handlers);
+    return;
+  }
+
+  if (patternNode.type === "ArrayPattern") {
+    await assignArrayPattern(patternNode, context, sourceRegister, handlers);
+    return;
+  }
+
+  if (patternNode.type === "RestElement") {
+    await assignPatternNode(patternNode.argument, context, sourceRegister, handlers);
+    return;
+  }
+
+  throw new Error(`Unsupported pattern element: ${patternNode.type}`);
+}
+
+async function assignObjectPattern(patternNode, context, sourceRegister, handlers) {
   for (const property of patternNode.properties) {
     if (property.type === "RestElement") {
       throw new Error("Unsupported object rest destructuring");
@@ -18,34 +75,11 @@ async function assignObjectPattern(patternNode, context, sourceRegister, assignV
     const keyRegister = compileLiteralValue(property.key.name ?? property.key.value, context);
     const valueRegister = newRegister(context);
     emit(context, [OpCode.GETFIELD, valueRegister, sourceRegister, keyRegister]);
-
-    if (property.value.type === "Identifier") {
-      assignValue(property.value.name, valueRegister);
-      continue;
-    }
-
-    if (property.value.type === "AssignmentPattern" && property.value.left.type === "Identifier") {
-      const undefinedRegister = compileLiteralValue(undefined, context);
-      const defaultRegister = await compileExpression(property.value.right, context);
-      const testRegister = newRegister(context);
-      const useDefaultLabel = `L${context.labelCounter + 1}`;
-      const doneLabel = `L${context.labelCounter + 2}`;
-      context.labelCounter += 2;
-      emit(context, [OpCode.ISEQ, testRegister, valueRegister, undefinedRegister]);
-      emit(context, [OpCode.JUMPT, testRegister, useDefaultLabel]);
-      assignValue(property.value.left.name, valueRegister);
-      emit(context, [OpCode.JUMP, doneLabel]);
-      emit(context, [`${useDefaultLabel}:`]);
-      assignValue(property.value.left.name, defaultRegister);
-      emit(context, [`${doneLabel}:`]);
-      continue;
-    }
-
-    throw new Error(`Unsupported pattern element: ${property.value.type}`);
+    await assignPatternNode(property.value, context, valueRegister, handlers);
   }
 }
 
-async function assignArrayPattern(patternNode, context, sourceRegister, assignValue, initializeValue) {
+async function assignArrayPattern(patternNode, context, sourceRegister, handlers) {
   let restIndex = -1;
   for (let index = 0; index < patternNode.elements.length; index += 1) {
     const element = patternNode.elements[index];
@@ -65,30 +99,7 @@ async function assignArrayPattern(patternNode, context, sourceRegister, assignVa
     const indexRegister = compileLiteralValue(index, context);
     const valueRegister = newRegister(context);
     emit(context, [OpCode.GETFIELD, valueRegister, sourceRegister, indexRegister]);
-
-    if (element.type === "Identifier") {
-      assignValue(element.name, valueRegister);
-      continue;
-    }
-
-    if (element.type === "AssignmentPattern" && element.left.type === "Identifier") {
-      const undefinedRegister = compileLiteralValue(undefined, context);
-      const defaultRegister = await compileExpression(element.right, context);
-      const testRegister = newRegister(context);
-      const useDefaultLabel = `L${context.labelCounter + 1}`;
-      const doneLabel = `L${context.labelCounter + 2}`;
-      context.labelCounter += 2;
-      emit(context, [OpCode.ISEQ, testRegister, valueRegister, undefinedRegister]);
-      emit(context, [OpCode.JUMPT, testRegister, useDefaultLabel]);
-      assignValue(element.left.name, valueRegister);
-      emit(context, [OpCode.JUMP, doneLabel]);
-      emit(context, [`${useDefaultLabel}:`]);
-      assignValue(element.left.name, defaultRegister);
-      emit(context, [`${doneLabel}:`]);
-      continue;
-    }
-
-    throw new Error(`Unsupported pattern element in array: ${element.type}`);
+    await assignPatternNode(element, context, valueRegister, handlers);
   }
 
   if (restIndex !== -1) {
@@ -114,56 +125,31 @@ async function assignArrayPattern(patternNode, context, sourceRegister, assignVa
     emit(context, [OpCode.ADD, cursorRegister, cursorRegister, oneRegister]);
     emit(context, [OpCode.JUMP, loopLabel]);
     emit(context, [`${endLabel}:`]);
-
-    if (initializeValue) {
-      initializeValue(restElement.argument.name, restArray);
-    } else {
-      assignValue(restElement.argument.name, restArray);
-    }
+    await assignPatternNode(restElement.argument, context, restArray, handlers);
   }
 }
 
 async function initializePattern(patternNode, context, sourceRegister, declarationKind) {
-  if (patternNode.type === "ObjectPattern") {
-    return assignObjectPattern(patternNode, context, sourceRegister, (name, valueRegister) =>
-      initializeBinding(context, name, valueRegister, { declarationKind })
-    );
-  }
-
-  if (patternNode.type === "ArrayPattern") {
-    return assignArrayPattern(
-      patternNode,
-      context,
-      sourceRegister,
-      (name, valueRegister) => initializeBinding(context, name, valueRegister, { declarationKind }),
-      (name, valueRegister) => initializeBinding(context, name, valueRegister, { declarationKind })
-    );
-  }
-
-  throw new Error(`Unsupported declaration type: ${patternNode.type}`);
+  return assignPatternNode(patternNode, context, sourceRegister, {
+    assignIdentifier: (name, valueRegister) =>
+      initializeBinding(context, name, valueRegister, { declarationKind }),
+  });
 }
 
 async function assignPattern(patternNode, context, sourceRegister) {
-  if (patternNode.type === "ObjectPattern") {
-    return assignObjectPattern(patternNode, context, sourceRegister, (name, valueRegister) =>
-      storeBindingValue(context, name, valueRegister)
-    );
-  }
-
-  if (patternNode.type === "ArrayPattern") {
-    return assignArrayPattern(
-      patternNode,
-      context,
-      sourceRegister,
-      (name, valueRegister) => storeBindingValue(context, name, valueRegister)
-    );
-  }
-
-  throw new Error(`Unsupported assignment pattern: ${patternNode.type}`);
+  const { compileAssignmentTarget, emitStoreAssignmentTarget } = require("./assignment-targets");
+  return assignPatternNode(patternNode, context, sourceRegister, {
+    assignIdentifier: (name, valueRegister) => storeBindingValue(context, name, valueRegister),
+    assignMemberExpression: async (node, valueRegister) => {
+      const target = await compileAssignmentTarget(node, context);
+      emitStoreAssignmentTarget(target, valueRegister, context);
+    },
+  });
 }
 
 module.exports = {
   assignPattern,
+  collectPatternBindingNames,
   initializePattern,
 };
 
