@@ -78,6 +78,7 @@ class BytecodeVM {
       bindingNameStack: [this.program.scopeBindings || {}],
       registers: createRegisters(),
       thisValue: undefined,
+      newTarget: undefined,
       tryStack: [],
       withStack: [],
       exports: {},
@@ -121,6 +122,7 @@ class BytecodeVM {
       registers: execState.registers,
       labels,
       thisValue: execState.thisValue,
+      newTarget: execState.newTarget,
       tryStack: execState.tryStack,
       withStack: execState.withStack,
       exports: execState.exports,
@@ -1293,7 +1295,7 @@ function normalizeArrayBuiltins(runtimeGlobal) {
     if (!shouldUseManualConcat(this, items)) {
       return nativeConcat.apply(this, items);
     }
-    return performManualConcat(this, items);
+    return performManualConcat(this, items, ArrayCtor);
   }, 1);
   defineBuiltinFunctionMetadata(concat, "concat", 1);
 
@@ -1306,18 +1308,15 @@ function normalizeArrayBuiltins(runtimeGlobal) {
 }
 
 function shouldUseManualConcat(receiver, items) {
-  if (!Array.isArray(receiver)) {
-    return false;
-  }
-
-  return items.some((item) => isConcatSpreadable(item));
+  return Array.isArray(receiver);
 }
 
-function performManualConcat(receiver, items) {
-  const result = [];
+function performManualConcat(receiver, items, defaultArrayCtor = Array) {
+  const result = arraySpeciesCreate(receiver, 0, defaultArrayCtor);
   let nextIndex = 0;
 
-  for (const item of [receiver, ...items]) {
+  for (let itemIndex = 0; itemIndex <= items.length; itemIndex += 1) {
+    const item = itemIndex === 0 ? receiver : items[itemIndex - 1];
     if (!isConcatSpreadable(item)) {
       defineOwnArrayElement(result, nextIndex, item);
       nextIndex += 1;
@@ -1337,8 +1336,53 @@ function performManualConcat(receiver, items) {
     }
   }
 
-  result.length = nextIndex;
+  setArrayLikeLengthOrThrow(result, nextIndex);
   return result;
+}
+
+function arraySpeciesCreate(originalArray, length, defaultArrayCtor = Array) {
+  if (!Array.isArray(originalArray)) {
+    return new defaultArrayCtor(length);
+  }
+
+  let C = originalArray.constructor;
+  if (C === undefined) {
+    return new defaultArrayCtor(length);
+  }
+
+  if (
+    C !== defaultArrayCtor &&
+    isConstructorValue(C) &&
+    isNativeArrayConstructor(C, defaultArrayCtor)
+  ) {
+    return new defaultArrayCtor(length);
+  }
+
+  if (C !== null && (typeof C === "object" || typeof C === "function")) {
+    const species = C[Symbol.species];
+    if (species === null || species === undefined) {
+      return new defaultArrayCtor(length);
+    }
+    C = species;
+  }
+
+  if (!isConstructorValue(C)) {
+    throw new TypeError("Array species is not a constructor");
+  }
+
+  return new C(length);
+}
+
+function isNativeArrayConstructor(value, defaultArrayCtor = Array) {
+  if (typeof value !== "function") {
+    return false;
+  }
+
+  try {
+    return Function.prototype.toString.call(value) === Function.prototype.toString.call(defaultArrayCtor);
+  } catch {
+    return false;
+  }
 }
 
 function isConcatSpreadable(value) {
@@ -1692,162 +1736,65 @@ function defineBuiltinFunctionMetadata(fn, name, length) {
 }
 
 function createRealmArrayFromAsync(runtimeGlobal) {
-  if (typeof runtimeGlobal.Function === "function") {
-    const impl = runtimeGlobal.Function(`
-      const iteratorSymbol = Symbol.iterator;
-      const asyncIteratorSymbol = Symbol.asyncIterator;
-      return async function fromAsyncImpl(items, mapFn, thisArg) {
-        if (new.target) {
-          throw new TypeError("Array.fromAsync is not a constructor");
-        }
-        if (items === null || items === undefined) {
-          throw new TypeError("Array.fromAsync requires a non-null asyncItems value");
-        }
+  const impl = createArrayFromAsyncImpl(runtimeGlobal);
+  return createNonConstructorMethod(impl, 1);
+}
 
-        const mapping = mapFn !== undefined;
-        if (mapping && typeof mapFn !== "function") {
-          throw new TypeError("Array.fromAsync mapFn must be callable");
-        }
+function createArrayFromAsyncImpl(runtimeGlobal) {
+  const ArrayCtor = runtimeGlobal.Array || Array;
+  const ObjectCtor = runtimeGlobal.Object || Object;
+  const NumberCtor = runtimeGlobal.Number || Number;
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  const ReflectObj = runtimeGlobal.Reflect || Reflect;
+  const SymbolCtor = runtimeGlobal.Symbol || Symbol;
+  const iteratorSymbol = SymbolCtor.iterator;
+  const asyncIteratorSymbol = SymbolCtor.asyncIterator;
 
-        const isConstructorValue = (value) => {
-          if (typeof value !== "function") {
-            return false;
-          }
-          try {
-            Reflect.construct(function noop() {}, [], value);
-            return true;
-          } catch {
-            return false;
-          }
-        };
+  const isRealmConstructor = (value) => {
+    if (typeof value !== "function") {
+      return false;
+    }
+    try {
+      ReflectObj.construct(function noop() {}, [], value);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
-        const defineOwnArrayElement = (array, index, value) => {
-          Object.defineProperty(array, index, {
-            value,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-          });
-        };
+  const setRealmLengthOrThrow = (target, length) => {
+    if (!ReflectObj.set(target, "length", length, target) || !Object.is(target.length, length)) {
+      throw new TypeErrorCtor("Cannot assign array-like length");
+    }
+  };
 
-        const setArrayLikeLengthOrThrow = (target, length) => {
-          if (!Reflect.set(target, "length", length, target) || !Object.is(target.length, length)) {
-            throw new TypeError("Cannot assign array-like length");
-          }
-        };
+  const toRealmLength = (value) => {
+    if (typeof value === "bigint" || typeof value === "symbol") {
+      throw new TypeErrorCtor("Cannot convert value to length");
+    }
+    const length = NumberCtor(value);
+    if (!NumberCtor.isFinite(length) || length <= 0) {
+      return length === Infinity ? NumberCtor.MAX_SAFE_INTEGER : 0;
+    }
+    return Math.min(Math.floor(length), NumberCtor.MAX_SAFE_INTEGER);
+  };
 
-        const toLengthValue = (value) => {
-          if (typeof value === "bigint" || typeof value === "symbol") {
-            throw new TypeError("Cannot convert value to length");
-          }
-          const length = Number(value);
-          if (!Number.isFinite(length) || length <= 0) {
-            return length === Infinity ? Number.MAX_SAFE_INTEGER : 0;
-          }
-          return Math.min(Math.floor(length), Number.MAX_SAFE_INTEGER);
-        };
-
-        const ResultCtor = isConstructorValue(this) ? this : Array;
-        const result = new ResultCtor();
-        let nextIndex = 0;
-
-        const pushValue = async (value, awaitInput = true) => {
-          const awaitedValue = awaitInput ? await value : value;
-          const mappedValue = mapping
-            ? await mapFn.call(thisArg, awaitedValue, nextIndex)
-            : awaitedValue;
-          defineOwnArrayElement(result, nextIndex, mappedValue);
-          nextIndex += 1;
-        };
-
-        const closeAsyncIterator = async (iterator, completion) => {
-          const returnMethod = iterator.return;
-          if (returnMethod !== undefined && returnMethod !== null) {
-            if (typeof returnMethod !== "function") {
-              throw completion;
-            }
-            try {
-              const returnResult = await returnMethod.call(iterator);
-              if (returnResult === null || returnResult === undefined || (typeof returnResult !== "object" && typeof returnResult !== "function")) {
-                throw new TypeError("Iterator return result is not an object");
-              }
-            } catch (closeError) {
-              throw closeError;
-            }
-          }
-          throw completion;
-        };
-
-        if (items !== null && items !== undefined) {
-          const asyncIteratorFactory = items[asyncIteratorSymbol];
-          if (asyncIteratorFactory !== undefined && asyncIteratorFactory !== null && typeof asyncIteratorFactory !== "function") {
-            throw new TypeError("@@asyncIterator must be callable");
-          }
-          if (typeof asyncIteratorFactory === "function") {
-            const iterator = asyncIteratorFactory.call(items);
-            while (true) {
-              let nextResult;
-              try {
-                nextResult = await iterator.next();
-              } catch (error) {
-                throw error;
-              }
-              if (nextResult.done) {
-                break;
-              }
-              try {
-                await pushValue(nextResult.value, false);
-              } catch (error) {
-                await closeAsyncIterator(iterator, error);
-              }
-            }
-            setArrayLikeLengthOrThrow(result, nextIndex);
-            return result;
-          }
-
-          const syncIteratorFactory = items[iteratorSymbol];
-          if (syncIteratorFactory !== undefined && syncIteratorFactory !== null && typeof syncIteratorFactory !== "function") {
-            throw new TypeError("@@iterator must be callable");
-          }
-          if (typeof syncIteratorFactory === "function") {
-            for (const value of items) {
-              await pushValue(value);
-            }
-            setArrayLikeLengthOrThrow(result, nextIndex);
-            return result;
-          }
-        }
-
-        const arrayLike = Object(items);
-        const length = toLengthValue(arrayLike.length);
-        for (let index = 0; index < length; index += 1) {
-          await pushValue(arrayLike[index]);
-        }
-        setArrayLikeLengthOrThrow(result, nextIndex);
-        return result;
-      };
-    `)();
-    return createNonConstructorMethod(impl, 1);
-  }
-
-  const iteratorSymbol = Symbol.iterator;
-  const asyncIteratorSymbol = Symbol.asyncIterator;
-  return createNonConstructorMethod(async function fromAsyncImpl(items, mapFn, thisArg) {
+  return async function fromAsyncImpl(items, mapFn, thisArg) {
     if (new.target) {
-      throw new TypeError("Array.fromAsync is not a constructor");
+      throw new TypeErrorCtor("Array.fromAsync is not a constructor");
     }
     if (items === null || items === undefined) {
-      throw new TypeError("Array.fromAsync requires a non-null asyncItems value");
+      throw new TypeErrorCtor("Array.fromAsync requires a non-null asyncItems value");
     }
 
     const mapping = mapFn !== undefined;
     if (mapping && typeof mapFn !== "function") {
-      throw new TypeError("Array.fromAsync mapFn must be callable");
+      throw new TypeErrorCtor("Array.fromAsync mapFn must be callable");
     }
 
-    const ResultCtor = isConstructorValue(this) ? this : runtimeGlobal.Array;
-    const result = new ResultCtor();
+    const ResultCtor = isRealmConstructor(this) ? this : ArrayCtor;
     let nextIndex = 0;
+    let result;
 
     const pushValue = async (value, awaitInput = true) => {
       const awaitedValue = awaitInput ? await value : value;
@@ -1867,7 +1814,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
         try {
           const returnResult = await returnMethod.call(iterator);
           if (returnResult === null || returnResult === undefined || (typeof returnResult !== "object" && typeof returnResult !== "function")) {
-            throw new TypeError("Iterator return result is not an object");
+            throw new TypeErrorCtor("Iterator return result is not an object");
           }
         } catch (closeError) {
           throw closeError;
@@ -1879,9 +1826,10 @@ function createRealmArrayFromAsync(runtimeGlobal) {
     if (items !== null && items !== undefined) {
       const asyncIteratorFactory = items[asyncIteratorSymbol];
       if (asyncIteratorFactory !== undefined && asyncIteratorFactory !== null && typeof asyncIteratorFactory !== "function") {
-        throw new TypeError("@@asyncIterator must be callable");
+        throw new TypeErrorCtor("@@asyncIterator must be callable");
       }
       if (typeof asyncIteratorFactory === "function") {
+        result = new ResultCtor();
         const iterator = asyncIteratorFactory.call(items);
         while (true) {
           const nextResult = await iterator.next();
@@ -1894,31 +1842,33 @@ function createRealmArrayFromAsync(runtimeGlobal) {
             await closeAsyncIterator(iterator, error);
           }
         }
-        setArrayLikeLengthOrThrow(result, nextIndex);
+        setRealmLengthOrThrow(result, nextIndex);
         return result;
       }
 
       const syncIteratorFactory = items[iteratorSymbol];
       if (syncIteratorFactory !== undefined && syncIteratorFactory !== null && typeof syncIteratorFactory !== "function") {
-        throw new TypeError("@@iterator must be callable");
+        throw new TypeErrorCtor("@@iterator must be callable");
       }
       if (typeof syncIteratorFactory === "function") {
+        result = new ResultCtor();
         for (const value of items) {
           await pushValue(value);
         }
-        setArrayLikeLengthOrThrow(result, nextIndex);
+        setRealmLengthOrThrow(result, nextIndex);
         return result;
       }
     }
 
-    const arrayLike = Object(items);
-    const length = toLengthValue(arrayLike.length);
+    const arrayLike = ObjectCtor(items);
+    const length = toRealmLength(arrayLike.length);
+    result = new ResultCtor(length);
     for (let index = 0; index < length; index += 1) {
       await pushValue(arrayLike[index]);
     }
-      setArrayLikeLengthOrThrow(result, nextIndex);
-      return result;
-    }, 1);
+    setRealmLengthOrThrow(result, nextIndex);
+    return result;
+  };
 }
 
 function isConstructorValue(value) {

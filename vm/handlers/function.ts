@@ -12,21 +12,32 @@ function prependInternalFrame(headValue, tailValues) {
   return result;
 }
 
-function createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg) {
+function createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, globalObject = globalThis, newTarget = undefined) {
   return {
     envStack: prependInternalFrame(createEnvironment(), capturedEnvs),
     bindingNameStack: prependInternalFrame(functionMeta.scopeBindings || {}, capturedBindingNames),
     registers: createRegisters(),
-    thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : thisArg,
+    thisValue: functionMeta.thisMode === "lexical" ? lexicalThis : normalizeThisArg(functionMeta, thisArg, globalObject),
+    newTarget,
     tryStack: [],
     exports: {},
     pendingError: undefined,
   };
 }
 
-function createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg) {
+function normalizeThisArg(functionMeta, thisArg, globalObject) {
+  if (functionMeta.strictMode) {
+    return thisArg;
+  }
+  if (thisArg === null || thisArg === undefined) {
+    return globalObject;
+  }
+  return (typeof thisArg === "object" || typeof thisArg === "function") ? thisArg : Object(thisArg);
+}
+
+function createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, globalObject = globalThis, newTarget = undefined) {
   return {
-    ...createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg),
+    ...createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, globalObject, newTarget),
     withStack: [],
   };
 }
@@ -92,10 +103,10 @@ function invokeCallable(vm, state, fn, thisArg, argsValues, callMode, instructio
   };
 }
 
-function createGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, callArgs) {
+function createGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, callArgs, newTarget = undefined) {
   const execState = vm.createExecutionState(
     null,
-    createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg)
+    createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget)
   );
   const frame = vm.createGeneratorFrame(functionMeta.bytecode, functionMeta, callArgs, execState);
 
@@ -117,10 +128,10 @@ function createGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBinding
   return iterator;
 }
 
-function createAsyncGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, callArgs) {
+function createAsyncGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, callArgs, newTarget = undefined) {
   const execState = vm.createExecutionState(
     null,
-    createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg)
+    createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget)
   );
   const frame = vm.createGeneratorFrame(functionMeta.bytecode, functionMeta, callArgs, execState);
 
@@ -182,12 +193,12 @@ async function handleFunction(vm, state, instruction) {
       const capturedEnvs = state.envStack.slice();
       const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
       const lexicalThis = state.thisValue;
-      const runClosure = (thisArg, callArgs) => {
-        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg);
+      const runClosure = (thisArg, callArgs, newTarget = undefined) => {
+        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
         return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
       };
-      const runClosureSync = (thisArg, callArgs) => {
-        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg);
+      const runClosureSync = (thisArg, callArgs, newTarget = undefined) => {
+        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
         return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
       };
       let closure;
@@ -200,7 +211,8 @@ async function handleFunction(vm, state, instruction) {
               capturedBindingNames,
               lexicalThis,
               state.thisValue,
-              callArgs
+              callArgs,
+              new.target ? closure : undefined
             )
           : createGeneratorIterator(
               vm,
@@ -209,20 +221,23 @@ async function handleFunction(vm, state, instruction) {
               capturedBindingNames,
               lexicalThis,
               state.thisValue,
-              callArgs
+              callArgs,
+              new.target ? closure : undefined
             ));
       } else {
         closure = function closureInvoker(...callArgs) {
           if (!functionMeta.isAsync) {
-            return runClosureSync(this, callArgs);
+            return runClosureSync(this, callArgs, new.target ? closure : undefined);
           }
-          return runClosure(this, callArgs);
+          return runClosure(this, callArgs, new.target ? closure : undefined);
         };
       }
       if (!functionMeta.isGenerator) {
         closure.__jsvmInvoke = runClosure;
+        closure.__jsvmConstruct = (thisArg, callArgs) => runClosure(thisArg, callArgs, closure);
         if (!functionMeta.isAsync) {
           closure.__jsvmInvokeSync = runClosureSync;
+          closure.__jsvmConstructSync = (thisArg, callArgs) => runClosureSync(thisArg, callArgs, closure);
         }
       }
       closure.__jsvmMeta = functionMeta;
@@ -263,7 +278,9 @@ async function handleFunction(vm, state, instruction) {
       }
       if (Ctor && typeof Ctor.__jsvmInvoke === "function") {
         const instance = Object.create(Ctor.prototype || Object.prototype);
-        const result = await Ctor.__jsvmInvoke(instance, argsValues);
+        const result = typeof Ctor.__jsvmConstruct === "function"
+          ? await Ctor.__jsvmConstruct(instance, argsValues)
+          : await Ctor.__jsvmInvoke(instance, argsValues);
         state.setRegister(
           destRegister,
           result && (typeof result === "object" || typeof result === "function") ? result : instance
@@ -292,7 +309,9 @@ async function handleFunction(vm, state, instruction) {
       }
       if (Ctor && typeof Ctor.__jsvmInvoke === "function") {
         const instance = Object.create(Ctor.prototype || Object.prototype);
-        const result = await Ctor.__jsvmInvoke(instance, argsValues);
+        const result = typeof Ctor.__jsvmConstruct === "function"
+          ? await Ctor.__jsvmConstruct(instance, argsValues)
+          : await Ctor.__jsvmInvoke(instance, argsValues);
         state.setRegister(
           destRegister,
           result && (typeof result === "object" || typeof result === "function") ? result : instance
@@ -410,12 +429,12 @@ module.exports = {
         const capturedEnvs = state.envStack.slice();
         const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
         const lexicalThis = state.thisValue;
-        const runClosure = (thisArg, callArgs) => {
-          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg);
+        const runClosure = (thisArg, callArgs, newTarget = undefined) => {
+          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
           return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
         };
-        const runClosureSync = (thisArg, callArgs) => {
-          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg);
+        const runClosureSync = (thisArg, callArgs, newTarget = undefined) => {
+          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
           return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
         };
         let closure;
@@ -428,7 +447,8 @@ module.exports = {
                 capturedBindingNames,
                 lexicalThis,
                 state.thisValue,
-                callArgs
+                callArgs,
+                new.target ? closure : undefined
               )
             : createGeneratorIterator(
                 vm,
@@ -437,20 +457,23 @@ module.exports = {
                 capturedBindingNames,
                 lexicalThis,
                 state.thisValue,
-                callArgs
+                callArgs,
+                new.target ? closure : undefined
               ));
         } else {
           closure = function closureInvoker(...callArgs) {
             if (!functionMeta.isAsync) {
-              return runClosureSync(this, callArgs);
+              return runClosureSync(this, callArgs, new.target ? closure : undefined);
             }
-            return runClosure(this, callArgs);
+            return runClosure(this, callArgs, new.target ? closure : undefined);
           };
         }
         if (!functionMeta.isGenerator) {
           closure.__jsvmInvoke = runClosure;
+          closure.__jsvmConstruct = (thisArg, callArgs) => runClosure(thisArg, callArgs, closure);
           if (!functionMeta.isAsync) {
             closure.__jsvmInvokeSync = runClosureSync;
+            closure.__jsvmConstructSync = (thisArg, callArgs) => runClosureSync(thisArg, callArgs, closure);
           }
         }
         closure.__jsvmMeta = functionMeta;
@@ -482,7 +505,9 @@ module.exports = {
         }
         if (Ctor && typeof Ctor.__jsvmInvokeSync === "function") {
           const instance = Object.create(Ctor.prototype || Object.prototype);
-          const result = Ctor.__jsvmInvokeSync(instance, argsValues);
+          const result = typeof Ctor.__jsvmConstructSync === "function"
+            ? Ctor.__jsvmConstructSync(instance, argsValues)
+            : Ctor.__jsvmInvokeSync(instance, argsValues);
           state.setRegister(
             destRegister,
             result && (typeof result === "object" || typeof result === "function") ? result : instance
@@ -514,7 +539,9 @@ module.exports = {
         }
         if (Ctor && typeof Ctor.__jsvmInvokeSync === "function") {
           const instance = Object.create(Ctor.prototype || Object.prototype);
-          const result = Ctor.__jsvmInvokeSync(instance, argsValues);
+          const result = typeof Ctor.__jsvmConstructSync === "function"
+            ? Ctor.__jsvmConstructSync(instance, argsValues)
+            : Ctor.__jsvmInvokeSync(instance, argsValues);
           state.setRegister(
             destRegister,
             result && (typeof result === "object" || typeof result === "function") ? result : instance

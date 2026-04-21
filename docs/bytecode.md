@@ -67,6 +67,8 @@ The compiler uses two runtime storage classes:
   Stores through the same dynamic name resolution order used by `GETNAME`.
 - `LOAD_THIS destReg`
   Loads the active `this` value for the current call frame.
+- `LOAD_NEW_TARGET destReg`
+  Loads the active `new.target` value, or `undefined` for ordinary calls.
 
 Bindings currently use TDZ-like failure on read-before-init.
 
@@ -81,6 +83,8 @@ Bindings currently use TDZ-like failure on read-before-init.
 - `BAND`, `BOR`, `BXOR`, `XOR`
 - `LSH`, `RSH`, `ULSH`, `URSH`
 - `ISEQ`, `ISNE`, `ISLT`, `ISLE`, `ISGT`, `ISGE`
+- `EQ`, `NE`
+  JavaScript loose equality / inequality for `==` and `!=`.
 - `NOT destReg srcReg`
 - `UNM destReg srcReg`
 - `TYPEOF destReg srcReg`

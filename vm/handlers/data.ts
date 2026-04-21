@@ -36,6 +36,9 @@ function handleData(vm, state, instruction) {
     case OpCode.BOOL:
       state.setRegister(instruction[1], Boolean(instruction[2]));
       return null;
+    case OpCode.LOAD_NEW_TARGET:
+      state.setRegister(instruction[1], state.newTarget);
+      return null;
     case OpCode.PUSH_ENV:
       state.pushEnv();
       return null;

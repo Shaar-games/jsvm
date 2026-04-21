@@ -17,11 +17,13 @@ const binaryExecutors = {
   [OpCode.XOR]: (left, right) => left ^ right,
   [OpCode.MOD]: (left, right) => left % right,
   [OpCode.ISEQ]: (left, right) => left === right,
+  [OpCode.EQ]: (left, right) => left == right,
   [OpCode.ISLT]: (left, right) => left < right,
   [OpCode.ISGE]: (left, right) => left >= right,
   [OpCode.ISLE]: (left, right) => left <= right,
   [OpCode.ISGT]: (left, right) => left > right,
   [OpCode.ISNE]: (left, right) => left !== right,
+  [OpCode.NE]: (left, right) => left != right,
   [OpCode.ISIN]: (left, right) => left in right,
   [OpCode.ISINSTANCE]: (left, right) => left instanceof right,
 };

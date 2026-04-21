@@ -3,6 +3,7 @@ const util = require("util");
 const { OpCode, DATA } = require("../bytecode/opcodes");
 const { createContext, serializeFunctions, serializeScopeBindings } = require("./context");
 const { compileBlockStatement } = require("./statements/BlockStatement");
+const { hasUseStrictDirective } = require("./directives");
 const { parseSource } = require("./parser");
 
 const expressionHandlers = {
@@ -29,6 +30,7 @@ const expressionHandlers = {
   TemplateLiteral: require("./expressions/TemplateLiteral"),
   SpreadElement: require("./expressions/SpreadElement"),
   YieldExpression: require("./expressions/YieldExpression"),
+  MetaProperty: require("./expressions/MetaProperty"),
 };
 
 const statementHandlers = {
@@ -63,6 +65,7 @@ async function compileProgram(code, options = {}) {
   const ast = parseSource(code, { sourceType });
   const context = createContext({
     ...options,
+    strictMode: sourceType === "module" || hasUseStrictDirective(ast),
     scriptMode: options.scriptMode || (sourceType === "script" ? "global" : "module"),
   });
   context.expressionHandlers = expressionHandlers;

@@ -72,7 +72,10 @@ const OP_NAMES = [
   "ITERNEXT",
   "EXPORT",
   "CLASS",
-  "SETMETHOD"
+  "SETMETHOD",
+  "EQ",
+  "NE",
+  "LOAD_NEW_TARGET"
 ];
 
 const OpCode = OP_NAMES.reduce((map, name, index) => {

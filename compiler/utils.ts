@@ -19,6 +19,7 @@ const {
   resolveIdentifier,
 } = require("./context");
 const { collectPatternBindingNames } = require("./pattern-bindings");
+const { hasUseStrictDirective } = require("./directives");
 
 function compileLiteralValue(value, context) {
   const register = newRegister(context);
@@ -41,6 +42,7 @@ function compileLiteralValue(value, context) {
 async function compileFunctionLike(node, context, functionName, bodyHandler) {
   const functionContext = createChildContext(context, { functionName });
   functionContext.thisMode = node.type === "ArrowFunctionExpression" ? "lexical" : "dynamic";
+  functionContext.strictMode = Boolean(context.strictMode || hasUseStrictDirective(node.body));
   const params = [];
   const paramSetup = [];
   let syntheticParamCounter = 0;

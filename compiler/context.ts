@@ -36,6 +36,7 @@ function createContext(options = {}) {
     functions: new Map(),
     controlLabels: [],
     withDepth: 0,
+    strictMode: Boolean(options.strictMode),
   };
 }
 
@@ -53,6 +54,7 @@ function createChildContext(parentContext, options = {}) {
     functions: new Map(),
     controlLabels: [],
     withDepth: parentContext.withDepth || 0,
+    strictMode: Boolean(parentContext.strictMode),
     functionName: options.functionName || null,
     expressionHandlers: parentContext.expressionHandlers,
     statementHandlers: parentContext.statementHandlers,
@@ -328,6 +330,7 @@ function registerCompiledFunction(context, node, functionContext, functionName, 
     thisMode: functionContext.thisMode || "dynamic",
     isAsync: Boolean(node.async),
     isGenerator: Boolean(node.generator),
+    strictMode: Boolean(functionContext.strictMode),
     bytecode: functionContext.bytecode,
     functions: functionContext.functions,
     startLine: node.loc ? node.loc.start.line : null,
@@ -361,6 +364,7 @@ function serializeFunctions(functions) {
     thisMode: func.thisMode,
     isAsync: Boolean(func.isAsync),
     isGenerator: Boolean(func.isGenerator),
+    strictMode: Boolean(func.strictMode),
     bytecode: func.bytecode.array.slice(),
     functions: serializeFunctions(func.functions || new Map()),
   }));
