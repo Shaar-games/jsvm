@@ -1,8 +1,17 @@
 // @ts-nocheck
 const { compileAssignmentTarget, emitLoadAssignmentTarget, emitStoreAssignmentTarget } = require("../assignment-targets");
 const { OpCode, emit, compileLiteralValue, newRegister, loadBindingValue, storeBindingValue } = require("../utils");
+const {
+  emitWebCompatCallAssignmentReferenceError,
+  isWebCompatCallAssignmentTarget,
+} = require("../web-compat-targets");
 
 async function compileUpdateExpression(node, context) {
+  if (isWebCompatCallAssignmentTarget(node.argument, context)) {
+    await emitWebCompatCallAssignmentReferenceError(node.argument, context);
+    return newRegister(context);
+  }
+
   let targetRegister;
   let storeUpdatedValue;
 

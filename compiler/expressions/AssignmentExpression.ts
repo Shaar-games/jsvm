@@ -8,6 +8,10 @@ const {
 const { assignPattern } = require("../patterns");
 const { getAssignmentBinaryOpcodeName } = require("../operators");
 const {
+  emitWebCompatCallAssignmentReferenceError,
+  isWebCompatCallAssignmentTarget,
+} = require("../web-compat-targets");
+const {
   OpCode,
   emit,
   compileLiteralValue,
@@ -17,6 +21,11 @@ const {
 } = require("../utils");
 
 async function compileAssignmentExpression(node, context) {
+  if (isWebCompatCallAssignmentTarget(node.left, context)) {
+    await emitWebCompatCallAssignmentReferenceError(node.left, context);
+    return newRegister(context);
+  }
+
   if (node.left.type === "Identifier" || node.left.type === "MemberExpression") {
     const target = await compileAssignmentTarget(node.left, context);
 

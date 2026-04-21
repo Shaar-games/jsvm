@@ -32,7 +32,9 @@ function handleBinary(_vm, state, instruction) {
     return undefined;
   }
 
-  const [, dest, left, right] = instruction;
+  const dest = instruction[1];
+  const left = instruction[2];
+  const right = instruction[3];
   state.setRegister(dest, executor(state.resolveValue(left), state.resolveValue(right)));
   return null;
 }

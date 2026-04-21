@@ -1,9 +1,9 @@
 // @ts-nocheck
-const acorn = require("acorn");
 const util = require("util");
 const { OpCode, DATA } = require("../bytecode/opcodes");
 const { createContext, serializeFunctions, serializeScopeBindings } = require("./context");
 const { compileBlockStatement } = require("./statements/BlockStatement");
+const { parseSource } = require("./parser");
 
 const expressionHandlers = {
   Literal: require("./expressions/Literal"),
@@ -28,6 +28,7 @@ const expressionHandlers = {
   ConditionalExpression: require("./expressions/ConditionalExpression"),
   TemplateLiteral: require("./expressions/TemplateLiteral"),
   SpreadElement: require("./expressions/SpreadElement"),
+  YieldExpression: require("./expressions/YieldExpression"),
 };
 
 const statementHandlers = {
@@ -54,11 +55,12 @@ const statementHandlers = {
   ExportDefaultDeclaration: require("./statements/ExportDefaultDeclaration"),
   SwitchStatement: require("./statements/SwitchStatement"),
   LabeledStatement: require("./statements/LabeledStatement"),
+  WithStatement: require("./statements/WithStatement"),
 };
 
 async function compileProgram(code, options = {}) {
   const { sourceType = "module", debug = false, filename = null } = options;
-  const ast = acorn.parse(code, { ecmaVersion: 2022, sourceType, locations: true });
+  const ast = parseSource(code, { sourceType });
   const context = createContext({
     ...options,
     scriptMode: options.scriptMode || (sourceType === "script" ? "global" : "module"),

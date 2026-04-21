@@ -228,6 +228,10 @@ function loadBindingValue(context, name) {
     return compileLiteralValue(undefined, context);
   }
 
+  if (context.withDepth > 0) {
+    return loadDynamicNameValue(context, name);
+  }
+
   const reference = resolveBindingReference(context, name);
   if (!reference) {
     const register = newRegister(context);
@@ -242,6 +246,10 @@ function loadBindingValue(context, name) {
 }
 
 function storeBindingValue(context, name, valueRegister) {
+  if (context.withDepth > 0) {
+    return storeDynamicNameValue(context, name, valueRegister);
+  }
+
   const reference = resolveBindingReference(context, name);
   if (!reference) {
     const staticIndex = addStaticValue(context, name);
@@ -250,6 +258,19 @@ function storeBindingValue(context, name, valueRegister) {
   }
 
   emit(context, [OpCode.STOREVAR, reference.depth, reference.binding.slot, valueRegister]);
+  return valueRegister;
+}
+
+function loadDynamicNameValue(context, name) {
+  const register = newRegister(context);
+  const staticIndex = addStaticValue(context, name);
+  emit(context, [OpCode.GETNAME, register, staticIndex]);
+  return register;
+}
+
+function storeDynamicNameValue(context, name, valueRegister) {
+  const staticIndex = addStaticValue(context, name);
+  emit(context, [OpCode.SETNAME, staticIndex, valueRegister]);
   return valueRegister;
 }
 
@@ -271,6 +292,7 @@ module.exports = {
   getRegister,
   initializeBinding,
   loadBindingValue,
+  loadDynamicNameValue,
   makeLabel,
   newRegister,
   popControlLabel,
@@ -278,6 +300,7 @@ module.exports = {
   resolveBreakTarget,
   resolveIdentifier,
   resolveContinueTarget,
+  storeDynamicNameValue,
   storeBindingValue,
 };
 

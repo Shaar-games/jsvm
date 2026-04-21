@@ -3,6 +3,10 @@ const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
 const { pushScope, popScope } = require("../context");
 const { OpCode, emit, emitLabel, initializeBinding, makeLabel, newRegister, popControlLabel, pushControlLabel, storeBindingValue } = require("../utils");
+const {
+  emitWebCompatCallAssignmentReferenceError,
+  isWebCompatCallAssignmentTarget,
+} = require("../web-compat-targets");
 
 async function compileForOfStatement(node, context) {
   const iterableRegister = await compileExpression(node.right, context);
@@ -18,6 +22,10 @@ async function compileForOfStatement(node, context) {
   emit(context, [OpCode.ITERNEXT, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);
 
+  if (isWebCompatCallAssignmentTarget(node.left, context)) {
+    await emitWebCompatCallAssignmentReferenceError(node.left, context);
+  }
+
   pushScope(context);
   emit(context, [OpCode.PUSH_ENV]);
   if (node.left.type === "VariableDeclaration") {
@@ -25,6 +33,8 @@ async function compileForOfStatement(node, context) {
     initializeBinding(context, declarator.id.name, valueRegister, { declarationKind: node.left.kind });
   } else if (node.left.type === "Identifier") {
     storeBindingValue(context, node.left.name, valueRegister);
+  } else if (isWebCompatCallAssignmentTarget(node.left, context)) {
+    // Already evaluated above for web-compat side effects, then throws.
   } else {
     throw new Error(`Unsupported for-of left-hand side: ${node.left.type}`);
   }

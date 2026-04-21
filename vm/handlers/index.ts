@@ -16,7 +16,8 @@ const handlers = [
 ];
 
 async function executeInstruction(vm, state, instruction) {
-  for (const handler of handlers) {
+  for (let index = 0; index < handlers.length; index += 1) {
+    const handler = handlers[index];
     const result = await handler(vm, state, instruction);
     if (result !== undefined) {
       return result;
@@ -27,7 +28,8 @@ async function executeInstruction(vm, state, instruction) {
 }
 
 function executeInstructionSync(vm, state, instruction) {
-  for (const handler of handlers) {
+  for (let index = 0; index < handlers.length; index += 1) {
+    const handler = handlers[index];
     if (handler === handleFunction) {
       const result = handleFunctionSync(vm, state, instruction);
       if (result !== undefined) {

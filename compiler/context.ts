@@ -35,6 +35,7 @@ function createContext(options = {}) {
     functionCounter: options.functionCounter || { value: 0 },
     functions: new Map(),
     controlLabels: [],
+    withDepth: 0,
   };
 }
 
@@ -51,6 +52,7 @@ function createChildContext(parentContext, options = {}) {
     functionCounter: parentContext.functionCounter,
     functions: new Map(),
     controlLabels: [],
+    withDepth: parentContext.withDepth || 0,
     functionName: options.functionName || null,
     expressionHandlers: parentContext.expressionHandlers,
     statementHandlers: parentContext.statementHandlers,
@@ -325,6 +327,7 @@ function registerCompiledFunction(context, node, functionContext, functionName, 
     scopeBindings: serializeScopeBindings(functionContext.scopeStack[functionContext.scopeStack.length - 1]),
     thisMode: functionContext.thisMode || "dynamic",
     isAsync: Boolean(node.async),
+    isGenerator: Boolean(node.generator),
     bytecode: functionContext.bytecode,
     functions: functionContext.functions,
     startLine: node.loc ? node.loc.start.line : null,
@@ -357,6 +360,7 @@ function serializeFunctions(functions) {
     scopeBindings: func.scopeBindings || {},
     thisMode: func.thisMode,
     isAsync: Boolean(func.isAsync),
+    isGenerator: Boolean(func.isGenerator),
     bytecode: func.bytecode.array.slice(),
     functions: serializeFunctions(func.functions || new Map()),
   }));

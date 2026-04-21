@@ -4,17 +4,20 @@ const { OpCode } = require("../../bytecode/opcodes");
 function handleData(vm, state, instruction) {
   switch (instruction[0]) {
     case OpCode.LOADK: {
-      const [, dest, staticIndex] = instruction;
+      const dest = instruction[1];
+      const staticIndex = instruction[2];
       state.setRegister(dest, vm.staticValues[staticIndex]);
       return null;
     }
     case OpCode.GETSTATIC: {
-      const [, dest, staticIndex] = instruction;
+      const dest = instruction[1];
+      const staticIndex = instruction[2];
       state.setRegister(dest, vm.staticValues[staticIndex]);
       return null;
     }
     case OpCode.MOVE: {
-      const [, dest, source] = instruction;
+      const dest = instruction[1];
+      const source = instruction[2];
       state.setRegister(dest, state.resolveValue(source));
       return null;
     }

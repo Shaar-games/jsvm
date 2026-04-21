@@ -1,29 +1,18 @@
 // @ts-nocheck
 const { compileExpression } = require("../dispatch/expressions");
 const { compileStatement } = require("../dispatch/statements");
-const { addStaticValue, pushScope, popScope } = require("../context");
-const { OpCode, compileLiteralValue, emit, emitLabel, initializeBinding, makeLabel, newRegister, popControlLabel, pushControlLabel, storeBindingValue } = require("../utils");
-
-function isWebCompatForInCallTarget(node, context) {
-  return node
-    && node.type === "CallExpression"
-    && context.options.sourceType === "script";
-}
-
-function emitReferenceErrorThrow(context) {
-  const referenceErrorCtorRegister = newRegister(context);
-  const thrownValueRegister = newRegister(context);
-  emit(context, [OpCode.GETENV, referenceErrorCtorRegister, addStaticValue(context, "ReferenceError")]);
-  emit(context, [OpCode.NEW, thrownValueRegister, referenceErrorCtorRegister, 0]);
-  emit(context, [OpCode.THROW, thrownValueRegister]);
-}
+const { pushScope, popScope } = require("../context");
+const { OpCode, compileLiteralValue, emit, emitLabel, initializeBinding, loadBindingValue, makeLabel, newRegister, popControlLabel, pushControlLabel, storeBindingValue } = require("../utils");
+const {
+  emitWebCompatCallAssignmentReferenceError,
+  isWebCompatCallAssignmentTarget,
+} = require("../web-compat-targets");
 
 async function compileForInStatement(node, context) {
   const objectRegister = await compileExpression(node.right, context);
-  const objectCtorRegister = newRegister(context);
+  const objectCtorRegister = loadBindingValue(context, "Object");
   const keysNameRegister = compileLiteralValue("keys", context);
   const keysFunctionRegister = newRegister(context);
-  emit(context, [OpCode.GETENV, objectCtorRegister, addStaticValue(context, "Object")]);
   emit(context, [OpCode.GETFIELD, keysFunctionRegister, objectCtorRegister, keysNameRegister]);
   const keysArrayRegister = newRegister(context);
   emit(context, [OpCode.CALL, keysFunctionRegister, 1, keysArrayRegister, objectCtorRegister, "default", objectRegister]);
@@ -40,9 +29,8 @@ async function compileForInStatement(node, context) {
   emit(context, [OpCode.ITERNEXT, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);
 
-  if (isWebCompatForInCallTarget(node.left, context)) {
-    await compileExpression(node.left, context);
-    emitReferenceErrorThrow(context);
+  if (isWebCompatCallAssignmentTarget(node.left, context)) {
+    await emitWebCompatCallAssignmentReferenceError(node.left, context);
   }
 
   pushScope(context);
@@ -52,7 +40,7 @@ async function compileForInStatement(node, context) {
     initializeBinding(context, declarator.id.name, valueRegister, { declarationKind: node.left.kind });
   } else if (node.left.type === "Identifier") {
     storeBindingValue(context, node.left.name, valueRegister);
-  } else if (isWebCompatForInCallTarget(node.left, context)) {
+  } else if (isWebCompatCallAssignmentTarget(node.left, context)) {
     // Already evaluated above for web-compat side effects, then throws.
   } else {
     throw new Error(`Unsupported for-in left-hand side: ${node.left.type}`);

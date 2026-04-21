@@ -3,7 +3,8 @@ function parseBytecode(bytecode) {
   const labels = new Map();
   const instructions = [];
 
-  for (const line of bytecode) {
+  for (let index = 0; index < bytecode.length; index += 1) {
+    const line = bytecode[index];
     if (line.length === 1 && typeof line[0] === "string" && line[0].endsWith(":")) {
       labels.set(line[0].slice(0, -1), instructions.length);
       continue;
@@ -24,7 +25,9 @@ function defineOwnArrayElement(array, value) {
 }
 
 function buildFunctionTable(functions, table = new Map()) {
-  for (const fn of functions || []) {
+  const list = functions || [];
+  for (let index = 0; index < list.length; index += 1) {
+    const fn = list[index];
     table.set(fn.id, fn);
     buildFunctionTable(fn.functions || [], table);
   }

@@ -249,6 +249,31 @@ function chunkFiles(files, chunkSize) {
   return chunks;
 }
 
+function shouldLogProgress(current, total, options = {}) {
+  const { isFailFast = false } = options;
+  if (current <= 5 || current === total) {
+    return true;
+  }
+
+  if (isFailFast) {
+    if (total <= 100) {
+      return current % 10 === 0;
+    }
+    if (total <= 1000) {
+      return current % 25 === 0;
+    }
+    return current % 50 === 0;
+  }
+
+  if (total <= 100) {
+    return true;
+  }
+  if (total <= 1000) {
+    return current % 25 === 0;
+  }
+  return current % 100 === 0;
+}
+
 async function runWorkerBatch(workerPath, batch, mode) {
   return new Promise((resolve, reject) => {
     const worker = fork(workerPath, [], {
@@ -350,7 +375,9 @@ async function runWorkerSuite(suiteName, files, mode) {
         results.push(buildWorkerCrashResult(file, mode, error));
       }
 
-      console.log(`Progress: ${index + 1}/${files.length}`);
+      if (shouldLogProgress(index + 1, files.length, { isFailFast: true })) {
+        console.log(`Progress: ${index + 1}/${files.length}`);
+      }
       const lastResult = results[results.length - 1];
       if (lastResult && lastResult.status === "failed") {
         break;
@@ -376,12 +403,16 @@ async function runWorkerSuite(suiteName, files, mode) {
         const batchResults = await runWorkerBatch(workerPath, batch, mode);
         results.push(...batchResults);
         completed += batch.length;
-        console.log(`Progress: ${completed}/${files.length}`);
+        if (shouldLogProgress(completed, files.length)) {
+          console.log(`Progress: ${completed}/${files.length}`);
+        }
       } catch (error) {
         if (batch.length === 1) {
           results.push(buildWorkerCrashResult(batch[0], mode, error));
           completed += 1;
-          console.log(`Progress: ${completed}/${files.length}`);
+          if (shouldLogProgress(completed, files.length)) {
+            console.log(`Progress: ${completed}/${files.length}`);
+          }
           continue;
         }
 
@@ -412,7 +443,7 @@ async function runTest262CompilerSuite() {
 
     for (const fullPath of files) {
       index += 1;
-      if (index % 1000 === 0) {
+      if (shouldLogProgress(index, files.length, { isFailFast: true })) {
         console.log(`Progress: ${index}/${files.length}`);
       }
 

@@ -49,15 +49,9 @@ class BytecodeVM {
   }
 
   async execute() {
-    const state = {
-      envStack: [createEnvironment()],
-      bindingNameStack: [this.program.scopeBindings || {}],
-      registers: createRegisters(),
+    const state = this.createExecutionState(null, {
       thisValue: this.getTopLevelThisValue(),
-      tryStack: [],
-      exports: {},
-      pendingError: undefined,
-    };
+    });
     const result = await this.executeChunk(this.program.entry, null, [], state);
     this.lastState = state;
     this.lastExports = state.exports;
@@ -65,39 +59,44 @@ class BytecodeVM {
   }
 
   executeSync() {
-    const state = {
-      envStack: [createEnvironment()],
-      bindingNameStack: [this.program.scopeBindings || {}],
-      registers: createRegisters(),
+    const state = this.createExecutionState(null, {
       thisValue: this.getTopLevelThisValue(),
-      tryStack: [],
-      exports: {},
-      pendingError: undefined,
-    };
+    });
     const result = this.executeChunkSync(this.program.entry, null, [], state);
     this.lastState = state;
     this.lastExports = state.exports;
     return result;
   }
 
-  async executeChunk(bytecode, functionMeta, args = [], runtimeState) {
-    const { instructions, labels } = parseBytecode(bytecode);
-    const execState = runtimeState || {
+  createExecutionState(runtimeState = null, overrides = {}) {
+    if (runtimeState) {
+      return runtimeState;
+    }
+
+    return {
       envStack: [createEnvironment()],
       bindingNameStack: [this.program.scopeBindings || {}],
       registers: createRegisters(),
       thisValue: undefined,
       tryStack: [],
+      withStack: [],
       exports: {},
       pendingError: undefined,
+      ...overrides,
     };
+  }
 
-    if (functionMeta && Array.isArray(functionMeta.paramBindings)) {
+  seedFunctionState(execState, functionMeta, args = []) {
+    if (!functionMeta) {
+      return;
+    }
+
+    if (Array.isArray(functionMeta.paramBindings)) {
       functionMeta.paramBindings.forEach((bindingRef, index) => {
         initBinding(execState.envStack, bindingRef.depth, bindingRef.slot, args[index]);
       });
     }
-    if (functionMeta && functionMeta.argumentsBinding) {
+    if (functionMeta.argumentsBinding) {
       initBinding(
         execState.envStack,
         functionMeta.argumentsBinding.depth,
@@ -105,7 +104,7 @@ class BytecodeVM {
         createArgumentsObject(args)
       );
     }
-    if (functionMeta && functionMeta.restBinding) {
+    if (functionMeta.restBinding) {
       initBinding(
         execState.envStack,
         functionMeta.restBinding.depth,
@@ -113,14 +112,17 @@ class BytecodeVM {
         args.slice(functionMeta.restBinding.index)
       );
     }
+  }
 
-    const state = {
+  createInstructionState(execState, labels) {
+    return {
       envStack: execState.envStack,
       bindingNameStack: execState.bindingNameStack,
       registers: execState.registers,
       labels,
       thisValue: execState.thisValue,
       tryStack: execState.tryStack,
+      withStack: execState.withStack,
       exports: execState.exports,
       get pendingError() {
         return execState.pendingError;
@@ -143,6 +145,389 @@ class BytecodeVM {
         execState.bindingNameStack.shift();
       },
     };
+  }
+
+  createGeneratorFrame(bytecode, functionMeta, args = [], runtimeState) {
+    const { instructions, labels } = parseBytecode(bytecode);
+    const execState = this.createExecutionState(runtimeState);
+    this.seedFunctionState(execState, functionMeta, args);
+    return {
+      instructions,
+      labels,
+      execState,
+      ip: 0,
+      done: false,
+      resumeRegister: null,
+      delegate: null,
+    };
+  }
+
+  getIteratorFromValue(iterable) {
+    if (iterable === null || iterable === undefined) {
+      throw new TypeError("Value is not iterable");
+    }
+    const iteratorMethod = iterable[Symbol.iterator];
+    if (typeof iteratorMethod !== "function") {
+      throw new TypeError("Value is not iterable");
+    }
+    const iterator = iteratorMethod.call(iterable);
+    if (iterator === null || iterator === undefined || (typeof iterator !== "object" && typeof iterator !== "function")) {
+      throw new TypeError("Iterator is not an object");
+    }
+    return iterator;
+  }
+
+  getAsyncIteratorFromValue(iterable) {
+    if (iterable === null || iterable === undefined) {
+      throw new TypeError("Value is not async iterable");
+    }
+
+    const asyncIteratorMethod = iterable[Symbol.asyncIterator];
+    if (typeof asyncIteratorMethod === "function") {
+      const iterator = asyncIteratorMethod.call(iterable);
+      if (iterator === null || iterator === undefined || (typeof iterator !== "object" && typeof iterator !== "function")) {
+        throw new TypeError("Async iterator is not an object");
+      }
+      return iterator;
+    }
+
+    const syncIterator = this.getIteratorFromValue(iterable);
+    return {
+      next(value) {
+        return Promise.resolve(syncIterator.next(value));
+      },
+      return(value) {
+        if (typeof syncIterator.return !== "function") {
+          return Promise.resolve({ done: true, value });
+        }
+        return Promise.resolve(syncIterator.return(value));
+      },
+      throw(error) {
+        if (typeof syncIterator.throw !== "function") {
+          return Promise.reject(error);
+        }
+        return Promise.resolve(syncIterator.throw(error));
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  }
+
+  resumeDelegatedGenerator(frame, resumeType = "next", resumeValue = undefined) {
+    while (frame.delegate) {
+      const { iterator, resumeRegister } = frame.delegate;
+      let methodName = "next";
+      if (resumeType === "throw") {
+        methodName = "throw";
+      } else if (resumeType === "return") {
+        methodName = "return";
+      }
+
+      let method = iterator[methodName];
+      if (method === undefined || method === null) {
+        if (resumeType === "throw") {
+          frame.delegate = null;
+          throw resumeValue;
+        }
+        if (resumeType === "return") {
+          frame.delegate = null;
+          frame.done = true;
+          return {
+            done: true,
+            value: resumeValue,
+          };
+        }
+        method = iterator.next;
+      }
+
+      if (typeof method !== "function") {
+        throw new TypeError(`Iterator ${methodName} method is not callable`);
+      }
+
+      const result = method.call(iterator, resumeValue);
+      if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+        throw new TypeError("Iterator result is not an object");
+      }
+
+      if (!result.done) {
+        return {
+          done: false,
+          value: result.value,
+        };
+      }
+
+      frame.delegate = null;
+      if (resumeRegister && resumeRegister !== "null") {
+        setRegister(frame.execState.registers, resumeRegister, result.value);
+      }
+      resumeType = "next";
+      resumeValue = undefined;
+    }
+
+    return null;
+  }
+
+  resumeGeneratorFrame(frame, resumeType = "next", resumeValue = undefined) {
+    if (frame.done) {
+      if (resumeType === "throw") {
+        throw resumeValue;
+      }
+      return {
+        done: true,
+        value: resumeType === "return" ? resumeValue : undefined,
+      };
+    }
+
+    if (resumeType === "throw") {
+      frame.done = true;
+      throw resumeValue;
+    }
+    if (resumeType === "return") {
+      frame.done = true;
+      return { done: true, value: resumeValue };
+    }
+
+    let ip = frame.ip;
+
+    while (true) {
+      const delegatedResult = this.resumeDelegatedGenerator(frame, resumeType, resumeValue);
+      if (delegatedResult) {
+        return delegatedResult;
+      }
+
+      if (frame.resumeRegister && frame.resumeRegister !== "null") {
+        setRegister(frame.execState.registers, frame.resumeRegister, resumeValue);
+        frame.resumeRegister = null;
+      }
+
+      const state = this.createInstructionState(frame.execState, frame.labels);
+
+      while (ip < frame.instructions.length) {
+      const instruction = frame.instructions[ip];
+      try {
+        const effect = executeInstructionSync(this, state, instruction);
+        if (effect && effect.type === "yield") {
+          frame.ip = ip + 1;
+          frame.resumeRegister = effect.resumeRegister;
+          return {
+            done: false,
+            value: effect.value,
+          };
+        }
+        if (effect && effect.type === "yield-star") {
+          frame.ip = ip + 1;
+          frame.delegate = {
+            iterator: this.getIteratorFromValue(effect.iterable),
+            resumeRegister: effect.resumeRegister,
+          };
+          ip = frame.ip;
+          resumeType = "next";
+          resumeValue = undefined;
+          break;
+        }
+        if (effect && effect.type === "return") {
+          frame.done = true;
+          frame.ip = frame.instructions.length;
+          frame.resumeRegister = null;
+          return {
+            done: true,
+            value: effect.value,
+          };
+        }
+        if (effect && effect.type === "jump") {
+          ip = effect.ip;
+          continue;
+        }
+      } catch (error) {
+        const handler = state.tryStack.pop();
+        if (!handler) {
+          frame.done = true;
+          throw error;
+        }
+        state.pendingError = error;
+        while (state.envStack.length > handler.envDepth) {
+          state.envStack.shift();
+        }
+        ip = this.jump(frame.labels, handler.catchLabel);
+        continue;
+      }
+
+      ip += 1;
+    }
+
+      if (frame.delegate) {
+        continue;
+      }
+
+      frame.done = true;
+      frame.ip = frame.instructions.length;
+      frame.resumeRegister = null;
+      return {
+        done: true,
+        value: undefined,
+      };
+    }
+  }
+
+  async resumeAsyncDelegatedGenerator(frame, resumeType = "next", resumeValue = undefined) {
+    while (frame.delegate) {
+      const { iterator, resumeRegister } = frame.delegate;
+      let methodName = "next";
+      if (resumeType === "throw") {
+        methodName = "throw";
+      } else if (resumeType === "return") {
+        methodName = "return";
+      }
+
+      let method = iterator[methodName];
+      if (method === undefined || method === null) {
+        if (resumeType === "throw") {
+          frame.delegate = null;
+          throw resumeValue;
+        }
+        if (resumeType === "return") {
+          frame.delegate = null;
+          frame.done = true;
+          return { done: true, value: resumeValue };
+        }
+        method = iterator.next;
+      }
+
+      if (typeof method !== "function") {
+        throw new TypeError(`Iterator ${methodName} method is not callable`);
+      }
+
+      const result = await method.call(iterator, resumeValue);
+      if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+        throw new TypeError("Iterator result is not an object");
+      }
+
+      if (!result.done) {
+        return {
+          done: false,
+          value: await result.value,
+        };
+      }
+
+      frame.delegate = null;
+      if (resumeRegister && resumeRegister !== "null") {
+        setRegister(frame.execState.registers, resumeRegister, result.value);
+      }
+      resumeType = "next";
+      resumeValue = undefined;
+    }
+
+    return null;
+  }
+
+  async resumeAsyncGeneratorFrame(frame, resumeType = "next", resumeValue = undefined) {
+    if (frame.done) {
+      if (resumeType === "throw") {
+        throw resumeValue;
+      }
+      return {
+        done: true,
+        value: resumeType === "return" ? resumeValue : undefined,
+      };
+    }
+
+    if (resumeType === "throw") {
+      frame.done = true;
+      throw resumeValue;
+    }
+    if (resumeType === "return") {
+      frame.done = true;
+      return { done: true, value: resumeValue };
+    }
+
+    let ip = frame.ip;
+
+    while (true) {
+      const delegatedResult = await this.resumeAsyncDelegatedGenerator(frame, resumeType, resumeValue);
+      if (delegatedResult) {
+        return delegatedResult;
+      }
+
+      if (frame.resumeRegister && frame.resumeRegister !== "null") {
+        setRegister(frame.execState.registers, frame.resumeRegister, resumeValue);
+        frame.resumeRegister = null;
+      }
+
+      const state = this.createInstructionState(frame.execState, frame.labels);
+
+      while (ip < frame.instructions.length) {
+        const instruction = frame.instructions[ip];
+        try {
+          const effect = await executeInstruction(this, state, instruction);
+          if (effect && effect.type === "yield") {
+            frame.ip = ip + 1;
+            frame.resumeRegister = effect.resumeRegister;
+            return {
+              done: false,
+              value: await effect.value,
+            };
+          }
+          if (effect && effect.type === "yield-star") {
+            frame.ip = ip + 1;
+            frame.delegate = {
+              iterator: this.getAsyncIteratorFromValue(effect.iterable),
+              resumeRegister: effect.resumeRegister,
+            };
+            ip = frame.ip;
+            resumeType = "next";
+            resumeValue = undefined;
+            break;
+          }
+          if (effect && effect.type === "return") {
+            frame.done = true;
+            frame.ip = frame.instructions.length;
+            frame.resumeRegister = null;
+            return {
+              done: true,
+              value: effect.value,
+            };
+          }
+          if (effect && effect.type === "jump") {
+            ip = effect.ip;
+            continue;
+          }
+        } catch (error) {
+          const handler = state.tryStack.pop();
+          if (!handler) {
+            frame.done = true;
+            throw error;
+          }
+          state.pendingError = error;
+          while (state.envStack.length > handler.envDepth) {
+            state.envStack.shift();
+          }
+          ip = this.jump(frame.labels, handler.catchLabel);
+          continue;
+        }
+
+        ip += 1;
+      }
+
+      if (frame.delegate) {
+        continue;
+      }
+
+      frame.done = true;
+      frame.ip = frame.instructions.length;
+      frame.resumeRegister = null;
+      return {
+        done: true,
+        value: undefined,
+      };
+    }
+  }
+
+  async executeChunk(bytecode, functionMeta, args = [], runtimeState) {
+    const { instructions, labels } = parseBytecode(bytecode);
+    const execState = this.createExecutionState(runtimeState);
+    this.seedFunctionState(execState, functionMeta, args);
+    const state = this.createInstructionState(execState, labels);
     let ip = 0;
 
     while (ip < instructions.length) {
@@ -177,71 +562,13 @@ class BytecodeVM {
 
   executeChunkSync(bytecode, functionMeta, args = [], runtimeState) {
     const { instructions, labels } = parseBytecode(bytecode);
-    const execState = runtimeState || {
-      envStack: [createEnvironment()],
-      bindingNameStack: [this.program.scopeBindings || {}],
-      registers: createRegisters(),
-      thisValue: undefined,
-      tryStack: [],
-      exports: {},
-      pendingError: undefined,
-    };
+    const execState = this.createExecutionState(runtimeState);
 
     if (functionMeta && functionMeta.isAsync) {
       throw new Error("Async function cannot run in sync VM path");
     }
-
-    if (functionMeta && Array.isArray(functionMeta.paramBindings)) {
-      functionMeta.paramBindings.forEach((bindingRef, index) => {
-        initBinding(execState.envStack, bindingRef.depth, bindingRef.slot, args[index]);
-      });
-    }
-    if (functionMeta && functionMeta.argumentsBinding) {
-      initBinding(
-        execState.envStack,
-        functionMeta.argumentsBinding.depth,
-        functionMeta.argumentsBinding.slot,
-        createArgumentsObject(args)
-      );
-    }
-    if (functionMeta && functionMeta.restBinding) {
-      initBinding(
-        execState.envStack,
-        functionMeta.restBinding.depth,
-        functionMeta.restBinding.slot,
-        args.slice(functionMeta.restBinding.index)
-      );
-    }
-
-    const state = {
-      envStack: execState.envStack,
-      bindingNameStack: execState.bindingNameStack,
-      registers: execState.registers,
-      labels,
-      thisValue: execState.thisValue,
-      tryStack: execState.tryStack,
-      exports: execState.exports,
-      get pendingError() {
-        return execState.pendingError;
-      },
-      set pendingError(value) {
-        execState.pendingError = value;
-      },
-      resolveValue: (token) => this.resolveValue(execState.registers, token),
-      setRegister: (registerName, value) => setRegister(execState.registers, registerName, value),
-      getBinding: (depth, slot) => this.getBindingValue(execState.envStack, depth, slot),
-      initBinding: (depth, slot, value) => initBinding(execState.envStack, depth, slot, value),
-      storeBinding: (depth, slot, value) => storeBinding(execState.envStack, depth, slot, value),
-      jump: (label) => this.jump(labels, label),
-      pushEnv: () => {
-        execState.envStack.unshift(createEnvironment());
-        execState.bindingNameStack.unshift({});
-      },
-      popEnv: () => {
-        execState.envStack.shift();
-        execState.bindingNameStack.shift();
-      },
-    };
+    this.seedFunctionState(execState, functionMeta, args);
+    const state = this.createInstructionState(execState, labels);
     let ip = 0;
 
     while (ip < instructions.length) {
@@ -915,7 +1242,7 @@ function normalizeLegacyBuiltins(runtimeGlobal) {
 function createArgumentsObject(args) {
   return function makeArgumentsObject() {
     return arguments;
-  }(...args);
+  }.apply(null, args);
 }
 
 function normalizeLegacyEscape(runtimeGlobal) {
@@ -1045,6 +1372,12 @@ function defineOwnArrayElement(array, index, value) {
     enumerable: true,
     configurable: true,
   });
+}
+
+function setArrayLikeLengthOrThrow(target, length) {
+  if (!Reflect.set(target, "length", length, target) || !Object.is(target.length, length)) {
+    throw new TypeError("Cannot assign array-like length");
+  }
 }
 
 function normalizeLegacyRegExpAccessors(runtimeGlobal) {
@@ -1397,6 +1730,12 @@ function createRealmArrayFromAsync(runtimeGlobal) {
           });
         };
 
+        const setArrayLikeLengthOrThrow = (target, length) => {
+          if (!Reflect.set(target, "length", length, target) || !Object.is(target.length, length)) {
+            throw new TypeError("Cannot assign array-like length");
+          }
+        };
+
         const toLengthValue = (value) => {
           if (typeof value === "bigint" || typeof value === "symbol") {
             throw new TypeError("Cannot convert value to length");
@@ -1462,7 +1801,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
                 await closeAsyncIterator(iterator, error);
               }
             }
-            result.length = nextIndex;
+            setArrayLikeLengthOrThrow(result, nextIndex);
             return result;
           }
 
@@ -1474,7 +1813,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
             for (const value of items) {
               await pushValue(value);
             }
-            result.length = nextIndex;
+            setArrayLikeLengthOrThrow(result, nextIndex);
             return result;
           }
         }
@@ -1484,7 +1823,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
         for (let index = 0; index < length; index += 1) {
           await pushValue(arrayLike[index]);
         }
-        result.length = nextIndex;
+        setArrayLikeLengthOrThrow(result, nextIndex);
         return result;
       };
     `)();
@@ -1555,7 +1894,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
             await closeAsyncIterator(iterator, error);
           }
         }
-        result.length = nextIndex;
+        setArrayLikeLengthOrThrow(result, nextIndex);
         return result;
       }
 
@@ -1567,7 +1906,7 @@ function createRealmArrayFromAsync(runtimeGlobal) {
         for (const value of items) {
           await pushValue(value);
         }
-        result.length = nextIndex;
+        setArrayLikeLengthOrThrow(result, nextIndex);
         return result;
       }
     }
@@ -1577,9 +1916,9 @@ function createRealmArrayFromAsync(runtimeGlobal) {
     for (let index = 0; index < length; index += 1) {
       await pushValue(arrayLike[index]);
     }
-    result.length = nextIndex;
-    return result;
-  }, 1);
+      setArrayLikeLengthOrThrow(result, nextIndex);
+      return result;
+    }, 1);
 }
 
 function isConstructorValue(value) {

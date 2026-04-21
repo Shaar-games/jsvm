@@ -50,12 +50,21 @@ The compiler uses two runtime storage classes:
   Pushes a new lexical scope.
 - `POP_ENV`
   Pops the current lexical scope.
+- `PUSH_WITH objectReg`
+  Pushes an object environment for `with` name resolution.
+- `POP_WITH`
+  Pops the current `with` object environment.
 - `LOADVAR destReg depth slot`
   Loads a binding from the lexical environment stack.
 - `INITVAR depth slot srcReg`
   Initializes a binding slot.
 - `STOREVAR depth slot srcReg`
   Updates an existing binding slot.
+- `GETNAME destReg staticIndex`
+  Resolves a name dynamically against the active `with` stack, then lexical
+  bindings, then the host global object.
+- `SETNAME staticIndex srcReg`
+  Stores through the same dynamic name resolution order used by `GETNAME`.
 - `LOAD_THIS destReg`
   Loads the active `this` value for the current call frame.
 
@@ -82,6 +91,12 @@ Bindings currently use TDZ-like failure on read-before-init.
 - `JUMPF testReg label`
 - `JUMPT testReg label`
 - `RETURN reg|null`
+- `YIELD resumeReg valueReg`
+  Suspends a generator function and yields `valueReg`. When resumed through
+  `.next(value)`, the sent-in value is written to `resumeReg`.
+- `YIELDSTAR resumeReg iterableReg`
+  Delegates iteration to the iterable in `iterableReg`. When delegation
+  completes, the delegate iterator's completion value is written to `resumeReg`.
 - `EXIT`
 
 ## Functions / Construction
@@ -104,7 +119,7 @@ Bindings currently use TDZ-like failure on read-before-init.
 - `GETERR destReg`
   Loads the pending exception captured by the VM when entering a catch block.
 
-## Iterators
+## Iterators / Generators
 
 - `GETITER destReg iterableReg`
 - `ITERNEXT doneReg valueReg iteratorReg`
@@ -130,5 +145,5 @@ Bindings currently use TDZ-like failure on read-before-init.
 ## Current Limits
 
 - lexical bindings are slot-based, but `const` write protection is not fully enforced yet
-- `try/finally`, `super`, private fields, generators and full module linkage are not complete
+- `try/finally`, `super`, private fields, async generators and full module linkage are not complete
 - class lowering covers basic constructor/prototype/static methods only

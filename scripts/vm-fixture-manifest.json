@@ -42,5 +42,13 @@
   {
     "file": "destructuring-params.js",
     "logs": ["12"]
+  },
+  {
+    "file": "yield.js",
+    "logs": ["a", "b"]
+  },
+  {
+    "file": "yield-star.js",
+    "logs": ["1", "2"]
   }
 ]
