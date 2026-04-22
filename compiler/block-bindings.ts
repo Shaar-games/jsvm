@@ -8,6 +8,21 @@ function predeclareBlockBindings(context, statements) {
   }
 }
 
+function collectImmediateVarBindingNames(statements) {
+  const names = new Set();
+  for (const statement of statements || []) {
+    if (!statement || statement.type !== "VariableDeclaration" || statement.kind !== "var") {
+      continue;
+    }
+    for (const declaration of statement.declarations || []) {
+      for (const name of collectPatternBindingNames(declaration.id)) {
+        names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
 function predeclareStatementBinding(context, statement) {
   if (!statement) {
     return;
@@ -43,6 +58,7 @@ function predeclareStatementBinding(context, statement) {
 }
 
 module.exports = {
+  collectImmediateVarBindingNames,
   predeclareBlockBindings,
 };
 

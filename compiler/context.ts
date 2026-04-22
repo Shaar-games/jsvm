@@ -313,12 +313,13 @@ function resolveIdentifier(context, name) {
   return register;
 }
 
-function registerCompiledFunction(context, node, functionContext, functionName, params) {
+function registerCompiledFunction(context, node, functionContext, functionName, params, functionLength = params.length) {
   const functionId = `F${context.functionCounter.value}`;
   context.functionCounter.value += 1;
   context.functions.set(functionId, {
     id: functionId,
     name: functionName,
+    length: functionLength,
     params,
     paramBindings: params.map((name) => {
       const reference = resolveBindingReference(functionContext, name);
@@ -356,6 +357,7 @@ function serializeFunctions(functions) {
   return Array.from(functions.values()).map((func) => ({
     id: func.id,
     name: func.name,
+    length: func.length,
     params: func.params,
     paramBindings: func.paramBindings,
     argumentsBinding: func.argumentsBinding,

@@ -22,7 +22,11 @@ function handleEnv(vm, state, instruction) {
     case OpCode.SETENV: {
       const staticIndex = instruction[1];
       const valueRegister = instruction[2];
-      vm.env[vm.staticValues[staticIndex]] = state.resolveValue(valueRegister);
+      const name = vm.staticValues[staticIndex];
+      vm.env[name] = state.resolveValue(valueRegister);
+      if (vm.env.__jsvmGlobalBindings && typeof vm.env.__jsvmGlobalBindings.add === "function") {
+        vm.env.__jsvmGlobalBindings.add(name);
+      }
       return null;
     }
     case OpCode.GETNAME: {
@@ -69,6 +73,9 @@ function handleEnv(vm, state, instruction) {
         }
       }
       vm.env[name] = value;
+      if (vm.env.__jsvmGlobalBindings && typeof vm.env.__jsvmGlobalBindings.add === "function") {
+        vm.env.__jsvmGlobalBindings.add(name);
+      }
       return null;
     }
     case OpCode.LOADVAR: {
@@ -114,6 +121,27 @@ function handleEnv(vm, state, instruction) {
     case OpCode.TYPEOF:
       state.setRegister(instruction[1], typeof state.resolveValue(instruction[2]));
       return null;
+    case OpCode.TYPEOFNAME: {
+      const destRegister = instruction[1];
+      const staticIndex = instruction[2];
+      const name = vm.staticValues[staticIndex];
+      for (let index = 0; index < state.withStack.length; index += 1) {
+        const withObject = state.withStack[index];
+        if (withObject && name in withObject) {
+          state.setRegister(destRegister, typeof withObject[name]);
+          return null;
+        }
+      }
+      for (let depth = 0; depth < state.bindingNameStack.length; depth += 1) {
+        const scopeBindings = state.bindingNameStack[depth] || {};
+        if (Object.prototype.hasOwnProperty.call(scopeBindings, name)) {
+          state.setRegister(destRegister, typeof state.getBinding(depth, scopeBindings[name].slot));
+          return null;
+        }
+      }
+      state.setRegister(destRegister, name in vm.env ? typeof vm.env[name] : "undefined");
+      return null;
+    }
     default:
       return undefined;
   }

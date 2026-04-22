@@ -46,10 +46,15 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
   const params = [];
   const paramSetup = [];
   let syntheticParamCounter = 0;
+  let functionLength = 0;
+  let functionLengthClosed = false;
 
   for (let index = 0; index < node.params.length; index += 1) {
     const param = node.params[index];
     if (param.type === "Identifier") {
+      if (!functionLengthClosed) {
+        functionLength += 1;
+      }
       params.push(param.name);
       declareBinding(functionContext, param.name, {
         kind: "param",
@@ -59,6 +64,7 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
     }
 
     if (param.type === "AssignmentPattern" && param.left.type === "Identifier") {
+      functionLengthClosed = true;
       params.push(param.left.name);
       declareBinding(functionContext, param.left.name, {
         kind: "param",
@@ -69,6 +75,7 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
     }
 
     if (param.type === "RestElement" && param.argument.type === "Identifier") {
+      functionLengthClosed = true;
       params.push(param.argument.name);
       const binding = declareBinding(functionContext, param.argument.name, {
         kind: "param",
@@ -91,6 +98,11 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
       (param.type === "RestElement" &&
         (param.argument.type === "ArrayPattern" || param.argument.type === "ObjectPattern"))
     ) {
+      if (param.type === "AssignmentPattern" || param.type === "RestElement") {
+        functionLengthClosed = true;
+      } else if (!functionLengthClosed) {
+        functionLength += 1;
+      }
       const syntheticName = `[[param${syntheticParamCounter}]]`;
       syntheticParamCounter += 1;
       params.push(syntheticName);
@@ -208,7 +220,8 @@ async function compileFunctionLike(node, context, functionName, bodyHandler) {
     node,
     functionContext,
     functionName,
-    params
+    params,
+    functionLength
   );
 
   const targetRegister = newRegister(context);

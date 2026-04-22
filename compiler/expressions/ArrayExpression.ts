@@ -5,6 +5,25 @@ const { OpCode, emit, compileLiteralValue, newRegister } = require("../utils");
 async function compileArrayExpression(node, context) {
   const arrayRegister = newRegister(context);
   emit(context, [OpCode.ARRAY, arrayRegister]);
+  const hasSpread = node.elements.some((element) => element && element.type === "SpreadElement");
+
+  if (!hasSpread) {
+    for (let index = 0; index < node.elements.length; index += 1) {
+      const element = node.elements[index];
+      if (!element) {
+        continue;
+      }
+
+      const keyRegister = compileLiteralValue(index, context);
+      const valueRegister = await compileExpression(element, context);
+      emit(context, [OpCode.DEFINEFIELD, arrayRegister, keyRegister, valueRegister]);
+    }
+
+    const lengthKeyRegister = compileLiteralValue("length", context);
+    const lengthValueRegister = compileLiteralValue(node.elements.length, context);
+    emit(context, [OpCode.SETFIELD, arrayRegister, lengthKeyRegister, lengthValueRegister]);
+    return arrayRegister;
+  }
 
   for (let index = 0; index < node.elements.length; index += 1) {
     const element = node.elements[index];

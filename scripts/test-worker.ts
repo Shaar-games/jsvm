@@ -180,7 +180,7 @@ async function runVmCase(fullPath, workspaceRoot, test262TestRoot) {
       filename: fullPath,
       env: harness,
     });
-    patchTest262HarnessRuntime(vm, harness, fullPath);
+    patchTest262HarnessRuntime(vm, harness, fullPath, metadata);
     let asyncCompletion = null;
     if (metadata.flags.includes("async")) {
       asyncCompletion = createAsyncDoneTracker();
@@ -305,8 +305,14 @@ function createAsyncDoneTracker() {
   };
 }
 
-function patchTest262HarnessRuntime(vm, harness, filename) {
+function patchTest262HarnessRuntime(vm, harness, filename, metadata = { flags: [] }) {
   const runtimeGlobal = vm.globalObject;
+  Object.defineProperty(runtimeGlobal, "__jsvmCanBlock", {
+    value: !metadata.flags.includes("CanBlockIsFalse"),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
 
   runtimeGlobal.$262 = {
     ...(runtimeGlobal.$262 || {}),

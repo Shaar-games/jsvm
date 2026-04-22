@@ -18,9 +18,11 @@ const vmManifest = require(path.join(workspaceRoot, "scripts", "vm-fixture-manif
 const args = new Set(process.argv.slice(2));
 const filterArg = process.argv.slice(2).find((arg) => arg.startsWith("--filter="));
 const limitArg = process.argv.slice(2).find((arg) => arg.startsWith("--limit="));
+const skipArg = process.argv.slice(2).find((arg) => arg.startsWith("--skip="));
 const workerChunkArg = process.argv.slice(2).find((arg) => arg.startsWith("--worker-chunk="));
 const testFilter = filterArg ? filterArg.slice("--filter=".length).toLowerCase() : "";
 const testLimit = limitArg ? Number(limitArg.slice("--limit=".length)) : null;
+const testSkip = skipArg ? Number(skipArg.slice("--skip=".length)) : 0;
 const failFast = args.has("--fail-fast");
 const workersArg = process.argv.slice(2).find((arg) => arg.startsWith("--workers="));
 const requestedWorkers = workersArg ? Number(workersArg.slice("--workers=".length)) : null;
@@ -40,12 +42,14 @@ function escapeHtml(value) {
 }
 
 function discoverLocalTests() {
-  return fs
+  const files = fs
     .readdirSync(localTestDir)
     .filter((file) => file.endsWith(".js"))
     .filter((file) => !file.endsWith(".expected.js"))
     .filter((file) => file !== "my-module.js")
+    .filter((file) => !testFilter || file.toLowerCase().includes(testFilter))
     .sort();
+  return applyTestWindow(files);
 }
 
 function walkJsFiles(rootDir) {
@@ -82,11 +86,21 @@ function walkJsFiles(rootDir) {
     filtered = filtered.filter((file) => file.toLowerCase().includes(testFilter));
   }
 
-  if (Number.isFinite(testLimit) && testLimit > 0) {
-    filtered = filtered.slice(0, testLimit);
+  filtered = applyTestWindow(filtered);
+  return filtered;
+}
+
+function applyTestWindow(items) {
+  let selected = items;
+  if (Number.isFinite(testSkip) && testSkip > 0) {
+    selected = selected.slice(testSkip);
   }
 
-  return filtered;
+  if (Number.isFinite(testLimit) && testLimit > 0) {
+    selected = selected.slice(0, testLimit);
+  }
+
+  return selected;
 }
 
 function getErrorMessage(error) {
@@ -161,9 +175,9 @@ async function runLocalCompilerSuite() {
 }
 
 async function runVmExecutionSuite() {
-  const fixtures = vmManifest
-    .filter((fixture) => !testFilter || fixture.file.toLowerCase().includes(testFilter))
-    .slice(0, Number.isFinite(testLimit) && testLimit > 0 ? testLimit : vmManifest.length);
+  const fixtures = applyTestWindow(
+    vmManifest.filter((fixture) => !testFilter || fixture.file.toLowerCase().includes(testFilter))
+  );
   const results = [];
 
   for (const fixture of fixtures) {
@@ -516,7 +530,14 @@ async function runTest262CompilerSuite() {
 }
 
 async function runTest262VmSuite(filesOverride) {
+  if (failFast) {
+    console.log("Fail-fast test262-vm run: discovering files...");
+  }
   const files = filesOverride || walkJsFiles(test262TestRoot);
+  if (failFast) {
+    return runFailFastTest262VmSuite(files);
+  }
+
   const eligibleFiles = [];
   let skippedForHost = 0;
 
@@ -534,6 +555,56 @@ async function runTest262VmSuite(filesOverride) {
     console.log(`Filtered ${skippedForHost} test262 VM files not compatible with ${vmHostRuntime} host runtime.`);
   }
   return runWorkerSuite("test262-vm", eligibleFiles, "vm");
+}
+
+async function runFailFastTest262VmSuite(files) {
+  const workerPath = path.join(__dirname, "test-worker.js");
+  const results = [];
+  let skippedForHost = 0;
+  let scanned = 0;
+  let executed = 0;
+
+  console.log(`Fail-fast test262-vm run: scanning ${files.length} files lazily`);
+
+  for (const fullPath of files) {
+    scanned += 1;
+    const id = path.relative(test262TestRoot, fullPath);
+    const code = fs.readFileSync(fullPath, "utf8");
+    const metadata = parseTest262Metadata(code);
+
+    if (!canExecuteInVmHost(code, metadata, vmHostRuntime)) {
+      skippedForHost += 1;
+      if (shouldLogProgress(scanned, files.length, { isFailFast: true })) {
+        console.log(`Scanned: ${scanned}/${files.length} | executed: ${executed} | skipped: ${skippedForHost}`);
+      }
+      continue;
+    }
+
+    executed += 1;
+    console.log(`Running ${executed}: ${id}`);
+
+    try {
+      const batchResults = await runWorkerBatch(workerPath, [fullPath], "vm");
+      results.push(...batchResults);
+    } catch (error) {
+      results.push(buildWorkerCrashResult(fullPath, "vm", error));
+    }
+
+    const lastResult = results[results.length - 1];
+    if (lastResult && lastResult.status === "failed") {
+      break;
+    }
+
+    if (shouldLogProgress(scanned, files.length, { isFailFast: true })) {
+      console.log(`Scanned: ${scanned}/${files.length} | executed: ${executed} | skipped: ${skippedForHost}`);
+    }
+  }
+
+  if (skippedForHost > 0) {
+    console.log(`Filtered ${skippedForHost} test262 VM files not compatible with ${vmHostRuntime} host runtime.`);
+  }
+
+  return results;
 }
 
 function summarize(results) {

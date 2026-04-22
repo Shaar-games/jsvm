@@ -76,6 +76,13 @@ Bindings currently use TDZ-like failure on read-before-init.
 
 - `GETFIELD destReg objectReg keyReg`
 - `SETFIELD objectReg keyReg valueReg`
+  Performs ordinary JavaScript assignment to a property.
+- `DEFINEFIELD objectReg keyReg valueReg`
+  Defines an own writable, enumerable, configurable data property. Used for
+  internal literal construction where inherited setters or readonly properties
+  must not affect element creation.
+- `DELETEFIELD destReg objectReg keyReg`
+  Deletes a property and stores the boolean result.
 
 ## Arithmetic / Comparison
 
@@ -88,6 +95,8 @@ Bindings currently use TDZ-like failure on read-before-init.
 - `NOT destReg srcReg`
 - `UNM destReg srcReg`
 - `TYPEOF destReg srcReg`
+- `TYPEOFNAME destReg staticIndex`
+  Computes `typeof` for a dynamic/global name without throwing for an undeclared binding.
 
 ## Control Flow
 
@@ -127,6 +136,10 @@ Bindings currently use TDZ-like failure on read-before-init.
 
 - `GETITER destReg iterableReg`
 - `ITERNEXT doneReg valueReg iteratorReg`
+- `GETASYNCITER destReg iterableReg`
+  Loads an async iterator. Sync iterables are adapted with AsyncFromSyncIterator semantics.
+- `ASYNCITERNEXT doneReg valueReg iteratorReg`
+  Awaits the next async iterator result and stores its `done` and `value` fields.
 
 ## Modules
 

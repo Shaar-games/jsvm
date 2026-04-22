@@ -5,9 +5,32 @@ const { createRegisters } = require("../registers");
 
 function prependInternalFrame(headValue, tailValues) {
   const result = new Array((tailValues ? tailValues.length : 0) + 1);
-  result[0] = headValue;
+  Object.defineProperty(result, 0, {
+    value: headValue,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   for (let index = 0; index < (tailValues ? tailValues.length : 0); index += 1) {
-    result[index + 1] = tailValues[index];
+    Object.defineProperty(result, index + 1, {
+      value: tailValues[index],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return result;
+}
+
+function copyArgumentsObject(argsLike) {
+  const result = new Array(argsLike.length);
+  for (let index = 0; index < argsLike.length; index += 1) {
+    Object.defineProperty(result, index, {
+      value: argsLike[index],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
   return result;
 }
@@ -33,6 +56,66 @@ function normalizeThisArg(functionMeta, thisArg, globalObject) {
     return globalObject;
   }
   return (typeof thisArg === "object" || typeof thisArg === "function") ? thisArg : Object(thisArg);
+}
+
+function isObjectLike(value) {
+  return value !== null && value !== undefined && (typeof value === "object" || typeof value === "function");
+}
+
+function defineClassElement(Klass, key, fn, kind, isStatic) {
+  const target = isStatic ? Klass : Klass.prototype;
+  if (kind === "constructor") {
+    Klass.prototype.constructorBody = fn;
+    return;
+  }
+
+  if (kind === "get" || kind === "set") {
+    const current = Object.getOwnPropertyDescriptor(target, key) || {
+      enumerable: false,
+      configurable: true,
+    };
+    Object.defineProperty(target, key, {
+      get: kind === "get" ? fn : current.get,
+      set: kind === "set" ? fn : current.set,
+      enumerable: false,
+      configurable: true,
+    });
+    return;
+  }
+
+  target[key] = fn;
+}
+
+function installCompiledFunctionLegacyAccessors(vm, closure, functionMeta) {
+  if (functionMeta.strictMode || functionMeta.thisMode === "lexical") {
+    return;
+  }
+
+  Object.defineProperty(closure, "caller", {
+    get() {
+      return vm.getLegacyFunctionCaller(closure);
+    },
+    set() {},
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(closure, "arguments", {
+    get() {
+      return null;
+    },
+    set() {},
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function installCompiledFunctionMetadata(closure, functionMeta) {
+  Object.defineProperty(closure, "length", {
+    value: Number.isInteger(functionMeta.length) ? functionMeta.length : 0,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
 }
 
 function createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, globalObject = globalThis, newTarget = undefined) {
@@ -124,6 +207,10 @@ function createGeneratorIterator(vm, functionMeta, capturedEnvs, capturedBinding
       return this;
     },
   };
+  const generatorPrototype = Object.getPrototypeOf(function* generator() {}());
+  if (generatorPrototype && typeof generatorPrototype === "object") {
+    Object.setPrototypeOf(iterator, generatorPrototype);
+  }
 
   return iterator;
 }
@@ -194,38 +281,50 @@ async function handleFunction(vm, state, instruction) {
       const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
       const lexicalThis = state.thisValue;
       const runClosure = (thisArg, callArgs, newTarget = undefined) => {
-        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
-        return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
+        return vm.enterFunctionCall(closure, functionMeta, () => {
+          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
+          nextState.currentFunction = closure;
+          nextState.currentFunctionMeta = functionMeta;
+          return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
+        });
       };
       const runClosureSync = (thisArg, callArgs, newTarget = undefined) => {
-        const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
-        return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
+        return vm.enterFunctionCall(closure, functionMeta, () => {
+          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
+          nextState.currentFunction = closure;
+          nextState.currentFunctionMeta = functionMeta;
+          return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
+        });
       };
       let closure;
       if (functionMeta.isGenerator) {
-        closure = (...callArgs) => (functionMeta.isAsync
-          ? createAsyncGeneratorIterator(
-              vm,
-              functionMeta,
-              capturedEnvs,
-              capturedBindingNames,
-              lexicalThis,
-              state.thisValue,
-              callArgs,
-              new.target ? closure : undefined
-            )
-          : createGeneratorIterator(
-              vm,
-              functionMeta,
-              capturedEnvs,
-              capturedBindingNames,
-              lexicalThis,
-              state.thisValue,
-              callArgs,
-              new.target ? closure : undefined
-            ));
+        closure = function generatorClosureInvoker() {
+          const callArgs = copyArgumentsObject(arguments);
+          return functionMeta.isAsync
+            ? createAsyncGeneratorIterator(
+                vm,
+                functionMeta,
+                capturedEnvs,
+                capturedBindingNames,
+                lexicalThis,
+                this,
+                callArgs,
+                new.target ? closure : undefined
+              )
+            : createGeneratorIterator(
+                vm,
+                functionMeta,
+                capturedEnvs,
+                capturedBindingNames,
+                lexicalThis,
+                this,
+                callArgs,
+                new.target ? closure : undefined
+              );
+        };
       } else {
-        closure = function closureInvoker(...callArgs) {
+        closure = function closureInvoker() {
+          const callArgs = copyArgumentsObject(arguments);
           if (!functionMeta.isAsync) {
             return runClosureSync(this, callArgs, new.target ? closure : undefined);
           }
@@ -241,6 +340,8 @@ async function handleFunction(vm, state, instruction) {
         }
       }
       closure.__jsvmMeta = functionMeta;
+      installCompiledFunctionMetadata(closure, functionMeta);
+      installCompiledFunctionLegacyAccessors(vm, closure, functionMeta);
       state.setRegister(destRegister, closure);
       return null;
     }
@@ -325,7 +426,7 @@ async function handleFunction(vm, state, instruction) {
       const destRegister = instruction[1];
       const iterableRegister = instruction[2];
       const iterable = state.resolveValue(iterableRegister);
-      const iterator = iterable[Symbol.iterator]();
+      const iterator = vm.getIteratorFromValue(iterable);
       state.setRegister(destRegister, iterator);
       return null;
     }
@@ -335,6 +436,30 @@ async function handleFunction(vm, state, instruction) {
       const iteratorRegister = instruction[3];
       const iterator = state.resolveValue(iteratorRegister);
       const result = iterator.next();
+      if (!isObjectLike(result)) {
+        throw new TypeError("Iterator result is not an object");
+      }
+      state.setRegister(doneRegister, Boolean(result.done));
+      state.setRegister(valueRegister, result.value);
+      return null;
+    }
+    case OpCode.GETASYNCITER: {
+      const destRegister = instruction[1];
+      const iterableRegister = instruction[2];
+      const iterable = state.resolveValue(iterableRegister);
+      const iterator = vm.getAsyncIteratorFromValue(iterable);
+      state.setRegister(destRegister, iterator);
+      return null;
+    }
+    case OpCode.ASYNCITERNEXT: {
+      const doneRegister = instruction[1];
+      const valueRegister = instruction[2];
+      const iteratorRegister = instruction[3];
+      const iterator = state.resolveValue(iteratorRegister);
+      const result = await iterator.next();
+      if (!isObjectLike(result)) {
+        throw new TypeError("Async iterator result is not an object");
+      }
       state.setRegister(doneRegister, Boolean(result.done));
       state.setRegister(valueRegister, result.value);
       return null;
@@ -354,13 +479,15 @@ async function handleFunction(vm, state, instruction) {
       Klass.prototype.constructor = Klass;
       Klass.__jsvmClass = true;
       Klass.__jsvmConstructSync = (instance, ctorArgs) => {
+        let thisValue = instance;
         if (superClass) {
-          Reflect.apply(superClass, instance, ctorArgs);
+          thisValue = Reflect.construct(superClass, ctorArgs, Klass);
         }
-        if (typeof instance.constructorBody === "function") {
-          return instance.constructorBody(...ctorArgs);
+        if (typeof thisValue.constructorBody === "function") {
+          const result = thisValue.constructorBody(...ctorArgs);
+          return result && (typeof result === "object" || typeof result === "function") ? result : thisValue;
         }
-        return undefined;
+        return superClass ? thisValue : undefined;
       };
       Klass.__jsvmConstruct = async (instance, ctorArgs) => Klass.__jsvmConstructSync(instance, ctorArgs);
       state.setRegister(destRegister, Klass);
@@ -375,13 +502,7 @@ async function handleFunction(vm, state, instruction) {
       const Klass = state.resolveValue(classRegister);
       const key = state.resolveValue(keyRegister);
       const fn = state.resolveValue(functionRegister);
-      if (kind === "constructor") {
-        Klass.prototype.constructorBody = fn;
-      } else if (isStatic) {
-        Klass[key] = fn;
-      } else {
-        Klass.prototype[key] = fn;
-      }
+      defineClassElement(Klass, key, fn, kind, isStatic);
       return null;
     }
     default:
@@ -430,38 +551,50 @@ module.exports = {
         const capturedBindingNames = state.bindingNameStack ? state.bindingNameStack.slice() : [];
         const lexicalThis = state.thisValue;
         const runClosure = (thisArg, callArgs, newTarget = undefined) => {
-          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
-          return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
+          return vm.enterFunctionCall(closure, functionMeta, () => {
+            const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
+            nextState.currentFunction = closure;
+            nextState.currentFunctionMeta = functionMeta;
+            return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
+          });
         };
         const runClosureSync = (thisArg, callArgs, newTarget = undefined) => {
-          const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
-          return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
+          return vm.enterFunctionCall(closure, functionMeta, () => {
+            const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
+            nextState.currentFunction = closure;
+            nextState.currentFunctionMeta = functionMeta;
+            return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
+          });
         };
         let closure;
         if (functionMeta.isGenerator) {
-          closure = (...callArgs) => (functionMeta.isAsync
-            ? createAsyncGeneratorIterator(
-                vm,
-                functionMeta,
-                capturedEnvs,
-                capturedBindingNames,
-                lexicalThis,
-                state.thisValue,
-                callArgs,
-                new.target ? closure : undefined
-              )
-            : createGeneratorIterator(
-                vm,
-                functionMeta,
-                capturedEnvs,
-                capturedBindingNames,
-                lexicalThis,
-                state.thisValue,
-                callArgs,
-                new.target ? closure : undefined
-              ));
+          closure = function generatorClosureInvoker() {
+            const callArgs = copyArgumentsObject(arguments);
+            return functionMeta.isAsync
+              ? createAsyncGeneratorIterator(
+                  vm,
+                  functionMeta,
+                  capturedEnvs,
+                  capturedBindingNames,
+                  lexicalThis,
+                  this,
+                  callArgs,
+                  new.target ? closure : undefined
+                )
+              : createGeneratorIterator(
+                  vm,
+                  functionMeta,
+                  capturedEnvs,
+                  capturedBindingNames,
+                  lexicalThis,
+                  this,
+                  callArgs,
+                  new.target ? closure : undefined
+                );
+          };
         } else {
-          closure = function closureInvoker(...callArgs) {
+          closure = function closureInvoker() {
+            const callArgs = copyArgumentsObject(arguments);
             if (!functionMeta.isAsync) {
               return runClosureSync(this, callArgs, new.target ? closure : undefined);
             }
@@ -477,6 +610,8 @@ module.exports = {
           }
         }
         closure.__jsvmMeta = functionMeta;
+        installCompiledFunctionMetadata(closure, functionMeta);
+        installCompiledFunctionLegacyAccessors(vm, closure, functionMeta);
         state.setRegister(destRegister, closure);
         return null;
       }
@@ -555,7 +690,7 @@ module.exports = {
         const destRegister = instruction[1];
         const iterableRegister = instruction[2];
         const iterable = state.resolveValue(iterableRegister);
-        const iterator = iterable[Symbol.iterator]();
+        const iterator = vm.getIteratorFromValue(iterable);
         state.setRegister(destRegister, iterator);
         return null;
       }
@@ -565,6 +700,9 @@ module.exports = {
         const iteratorRegister = instruction[3];
         const iterator = state.resolveValue(iteratorRegister);
         const result = iterator.next();
+        if (!isObjectLike(result)) {
+          throw new TypeError("Iterator result is not an object");
+        }
         state.setRegister(doneRegister, Boolean(result.done));
         state.setRegister(valueRegister, result.value);
         return null;
@@ -584,13 +722,15 @@ module.exports = {
         Klass.prototype.constructor = Klass;
         Klass.__jsvmClass = true;
         Klass.__jsvmConstructSync = (instance, ctorArgs) => {
+          let thisValue = instance;
           if (superClass) {
-            Reflect.apply(superClass, instance, ctorArgs);
+            thisValue = Reflect.construct(superClass, ctorArgs, Klass);
           }
-          if (typeof instance.constructorBody === "function") {
-            return instance.constructorBody(...ctorArgs);
+          if (typeof thisValue.constructorBody === "function") {
+            const result = thisValue.constructorBody(...ctorArgs);
+            return result && (typeof result === "object" || typeof result === "function") ? result : thisValue;
           }
-          return undefined;
+          return superClass ? thisValue : undefined;
         };
         Klass.__jsvmConstruct = async (instance, ctorArgs) => Klass.__jsvmConstructSync(instance, ctorArgs);
         state.setRegister(destRegister, Klass);
@@ -605,13 +745,7 @@ module.exports = {
         const Klass = state.resolveValue(classRegister);
         const key = state.resolveValue(keyRegister);
         const fn = state.resolveValue(functionRegister);
-        if (kind === "constructor") {
-          Klass.prototype.constructorBody = fn;
-        } else if (isStatic) {
-          Klass[key] = fn;
-        } else {
-          Klass.prototype[key] = fn;
-        }
+        defineClassElement(Klass, key, fn, kind, isStatic);
         return null;
       }
       case OpCode.AWAIT:

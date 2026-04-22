@@ -7,6 +7,64 @@ const { createRegisters, getRegister, setRegister } = require("./registers");
 const { executeInstruction, executeInstructionSync } = require("./handlers");
 const { buildFunctionTable, parseBytecode } = require("./parser");
 
+function internalUnshift(array, value) {
+  for (let index = array.length; index > 0; index -= 1) {
+    Object.defineProperty(array, index, {
+      value: array[index - 1],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(array, 0, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
+function internalPush(array, value) {
+  Object.defineProperty(array, array.length, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
+function internalRemoveAt(array, index) {
+  if (index < 0 || index >= array.length) {
+    return;
+  }
+  for (let current = index + 1; current < array.length; current += 1) {
+    Object.defineProperty(array, current - 1, {
+      value: array[current],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  array.length -= 1;
+}
+
+function internalShift(array) {
+  if (array.length === 0) {
+    return undefined;
+  }
+  const value = array[0];
+  for (let index = 1; index < array.length; index += 1) {
+    Object.defineProperty(array, index - 1, {
+      value: array[index],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  array.length -= 1;
+  return value;
+}
+
 class BytecodeVM {
   constructor(program, options = {}) {
     this.program = program;
@@ -19,9 +77,16 @@ class BytecodeVM {
     this.preferNativeEval = options.preferNativeEval !== false;
     this.allowVmEvalFallback = options.allowVmEvalFallback !== false;
     this.functionTable = buildFunctionTable(program.functions || []);
+    this.functionCallStack = options.functionCallStack || [];
     this.staticValues = (program.staticSection && program.staticSection.values) || [];
     this.globalObject = options.runtimeGlobal || buildRuntimeEnv(options.env || options.globals || {});
     this.env = this.globalObject;
+    Object.defineProperty(this.globalObject, "__jsvmFunctionCallStack", {
+      value: this.functionCallStack,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
     if (!this.globalObject.eval || !this.globalObject.eval.__jsvmDirectEval) {
       const directEval = function jsvmEval() {
         throw new Error("Direct eval interception should be handled by the VM call dispatcher");
@@ -83,6 +148,8 @@ class BytecodeVM {
       withStack: [],
       exports: {},
       pendingError: undefined,
+      currentFunction: null,
+      currentFunctionMeta: null,
       ...overrides,
     };
   }
@@ -126,6 +193,8 @@ class BytecodeVM {
       tryStack: execState.tryStack,
       withStack: execState.withStack,
       exports: execState.exports,
+      currentFunction: execState.currentFunction,
+      currentFunctionMeta: execState.currentFunctionMeta,
       get pendingError() {
         return execState.pendingError;
       },
@@ -139,12 +208,12 @@ class BytecodeVM {
       storeBinding: (depth, slot, value) => storeBinding(execState.envStack, depth, slot, value),
       jump: (label) => this.jump(labels, label),
       pushEnv: () => {
-        execState.envStack.unshift(createEnvironment());
-        execState.bindingNameStack.unshift({});
+        internalUnshift(execState.envStack, createEnvironment());
+        internalUnshift(execState.bindingNameStack, {});
       },
       popEnv: () => {
-        execState.envStack.shift();
-        execState.bindingNameStack.shift();
+        internalShift(execState.envStack);
+        internalShift(execState.bindingNameStack);
       },
     };
   }
@@ -195,8 +264,23 @@ class BytecodeVM {
 
     const syncIterator = this.getIteratorFromValue(iterable);
     return {
-      next(value) {
-        return Promise.resolve(syncIterator.next(value));
+      async next(value) {
+        const result = syncIterator.next(value);
+        if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+          throw new TypeError("Iterator result is not an object");
+        }
+        const done = Boolean(result.done);
+        if (done) {
+          return { done: true, value: result.value };
+        }
+        try {
+          return { done: false, value: await result.value };
+        } catch (error) {
+          if (typeof syncIterator.return === "function") {
+            await syncIterator.return();
+          }
+          throw error;
+        }
       },
       return(value) {
         if (typeof syncIterator.return !== "function") {
@@ -349,7 +433,7 @@ class BytecodeVM {
         }
         state.pendingError = error;
         while (state.envStack.length > handler.envDepth) {
-          state.envStack.shift();
+          internalShift(state.envStack);
         }
         ip = this.jump(frame.labels, handler.catchLabel);
         continue;
@@ -502,7 +586,7 @@ class BytecodeVM {
           }
           state.pendingError = error;
           while (state.envStack.length > handler.envDepth) {
-            state.envStack.shift();
+            internalShift(state.envStack);
           }
           ip = this.jump(frame.labels, handler.catchLabel);
           continue;
@@ -550,7 +634,7 @@ class BytecodeVM {
         }
         state.pendingError = error;
         while (state.envStack.length > handler.envDepth) {
-          state.envStack.shift();
+            internalShift(state.envStack);
         }
         ip = this.jump(labels, handler.catchLabel);
         continue;
@@ -591,7 +675,7 @@ class BytecodeVM {
         }
         state.pendingError = error;
         while (state.envStack.length > handler.envDepth) {
-          state.envStack.shift();
+            internalShift(state.envStack);
         }
         ip = this.jump(labels, handler.catchLabel);
         continue;
@@ -692,6 +776,7 @@ class BytecodeVM {
       preferNativeEval: this.preferNativeEval,
       allowVmEvalFallback: this.allowVmEvalFallback,
       moduleCache: this.moduleCache,
+      functionCallStack: this.functionCallStack,
     });
     const nextState = {
       envStack: options.indirect ? [createEnvironment()] : state.envStack,
@@ -701,6 +786,8 @@ class BytecodeVM {
       tryStack: [],
       exports: state.exports,
       pendingError: undefined,
+      currentFunction: null,
+      currentFunctionMeta: null,
     };
     return evalVm.executeChunk(program.entry, null, [], nextState);
   }
@@ -794,6 +881,7 @@ class BytecodeVM {
       preferNativeEval: this.preferNativeEval,
       allowVmEvalFallback: this.allowVmEvalFallback,
       moduleCache: this.moduleCache,
+      functionCallStack: this.functionCallStack,
     });
 
     let result;
@@ -844,8 +932,66 @@ class BytecodeVM {
       tryStack: [],
       exports: state.exports,
       pendingError: undefined,
+      currentFunction: state.currentFunction || null,
+      currentFunctionMeta: state.currentFunctionMeta || null,
     };
     return this.executeChunk(this.program.entry, null, [], nextState);
+  }
+
+  enterFunctionCall(fn, functionMeta, executor) {
+    const frame = { fn, meta: functionMeta || null };
+    internalPush(this.functionCallStack, frame);
+    try {
+      const result = executor();
+      if (result && typeof result.then === "function") {
+        return result.finally(() => {
+          this.popFunctionCallFrame(frame);
+        });
+      }
+      this.popFunctionCallFrame(frame);
+      return result;
+    } catch (error) {
+      this.popFunctionCallFrame(frame);
+      throw error;
+    }
+  }
+
+  popFunctionCallFrame(frame) {
+    const index = this.functionCallStack.lastIndexOf(frame);
+    if (index >= 0) {
+      internalRemoveAt(this.functionCallStack, index);
+    }
+  }
+
+  getLegacyFunctionCaller(fn) {
+    const functionMeta = fn && fn.__jsvmMeta ? fn.__jsvmMeta : null;
+    if (functionMeta && functionMeta.strictMode) {
+      throw new TypeError("Restricted function property access");
+    }
+
+    for (let index = this.functionCallStack.length - 1; index >= 0; index -= 1) {
+      const frame = this.functionCallStack[index];
+      if (frame.fn !== fn) {
+        continue;
+      }
+
+      const callerFrame = this.functionCallStack[index - 1] || null;
+      if (!callerFrame) {
+        return null;
+      }
+      if (callerFrame.hostFunctionBoundary) {
+        if (callerFrame.meta && callerFrame.meta.strictMode) {
+          throw new TypeError("Restricted function property access");
+        }
+        return null;
+      }
+      if (callerFrame.meta && callerFrame.meta.strictMode) {
+        throw new TypeError("Restricted function property access");
+      }
+      return callerFrame.fn || null;
+    }
+
+    return null;
   }
 
   resolveModulePath(specifier, parentFilename = this.filename) {
@@ -1033,6 +1179,18 @@ function buildRuntimeEnv(extraEnv = {}) {
     enumerable: false,
     configurable: true,
   });
+  Object.defineProperty(runtimeGlobal, "__jsvmStrictHostFunctionDepth", {
+    value: 0,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(runtimeGlobal, "__jsvmGlobalBindings", {
+    value: new Set(),
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
   if (typeof runtimeGlobal.fnGlobalObject !== "function") {
     Object.defineProperty(runtimeGlobal, "fnGlobalObject", {
       value() {
@@ -1061,15 +1219,29 @@ function createDirectEvalRunner(bindingNames) {
     "source",
     "hostEval",
     `
+const __jsvmEvalDescriptor = Object.getOwnPropertyDescriptor(globals, "eval");
+const __jsvmHadEval = Object.prototype.hasOwnProperty.call(globals, "eval");
+if (__jsvmHadEval) {
+  if (!__jsvmEvalDescriptor || !__jsvmEvalDescriptor.configurable) {
+    throw new Error("Cannot expose native direct eval while global eval is non-configurable");
+  }
+  delete globals.eval;
+}
+try {
 with (globals) {
 ${declarations}
-const __value = hostEval(source);
+const __value = eval(source);
 return {
   value: __value,
   bindings: {
 ${assignments}
   }
 };
+}
+} finally {
+  if (__jsvmHadEval) {
+    Object.defineProperty(globals, "eval", __jsvmEvalDescriptor);
+  }
 }
 `
   );
@@ -1231,20 +1403,282 @@ function cloneOwnProperties(target, source) {
 }
 
 function normalizeLegacyBuiltins(runtimeGlobal) {
+  normalizeRuntimeArrayConstructor(runtimeGlobal);
+  normalizeRuntimeFunctionConstructor(runtimeGlobal);
   normalizeLegacyEscape(runtimeGlobal);
+  normalizeRestrictedFunctionProperties(runtimeGlobal);
   normalizeArrayBuiltins(runtimeGlobal);
   normalizeLegacyStringHtmlMethods(runtimeGlobal);
   normalizeLegacyRegExpAccessors(runtimeGlobal);
   normalizeLegacyRegExpCompile(runtimeGlobal);
   normalizeArrayBufferExtensions(runtimeGlobal);
+  normalizeDataViewImmutableSetters(runtimeGlobal);
+  normalizeAtomicsBuiltins(runtimeGlobal);
   normalizeTemporalBuiltins(runtimeGlobal);
   normalizeIteratorBuiltins(runtimeGlobal);
+}
+
+function normalizeRuntimeArrayConstructor(runtimeGlobal) {
+  const NativeArray = runtimeGlobal.Array || Array;
+  if (typeof NativeArray !== "function" || NativeArray.__jsvmRuntimeArrayConstructor) {
+    return;
+  }
+
+  const RuntimeArray = function Array() {
+    const args = arguments;
+    if (new.target) {
+      const arrayNewTarget = new.target === RuntimeArray ? NativeArray : new.target;
+      return Reflect.construct(NativeArray, args, arrayNewTarget);
+    }
+    return NativeArray.apply(null, args);
+  };
+
+  cloneOwnProperties(RuntimeArray, NativeArray);
+  Object.defineProperty(RuntimeArray, "__jsvmRuntimeArrayConstructor", {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(RuntimeArray, "__jsvmNativeArrayConstructor", {
+    value: NativeArray.__jsvmNativeArrayConstructor || NativeArray,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.setPrototypeOf(RuntimeArray, Object.getPrototypeOf(NativeArray));
+  Object.defineProperty(RuntimeArray, "prototype", {
+    value: NativeArray.prototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  Object.defineProperty(RuntimeArray, "length", {
+    value: 1,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(runtimeGlobal, "Array", {
+    value: RuntimeArray,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
+  const NativeFunction = runtimeGlobal.Function || Function;
+  if (typeof NativeFunction !== "function" || NativeFunction.__jsvmRuntimeFunctionConstructor) {
+    return;
+  }
+
+  const RuntimeFunction = function Function(...parts) {
+    const params = [];
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      params.push(String(parts[index]));
+    }
+    const body = parts.length > 0 ? String(parts[parts.length - 1]) : "";
+    const isStrictBody = hasUseStrictSourceDirective(body);
+    const usesRuntimeGlobal = referencesRuntimeGlobalBinding(runtimeGlobal, body);
+    const usesRuntimeThis = !isStrictBody && /\bthis\b/.test(body);
+    const functionArgs = params.concat(body);
+    const functionNewTarget = new.target || RuntimeFunction;
+    const nativeFunction = Reflect.construct(NativeFunction, functionArgs, functionNewTarget);
+    const dynamicFunctionPrototype = getDynamicFunctionObjectPrototype(functionNewTarget, NativeFunction.prototype);
+    Object.setPrototypeOf(nativeFunction, dynamicFunctionPrototype);
+    if (!usesRuntimeGlobal && !runtimeGlobal.__jsvmFunctionCallStack) {
+      return nativeFunction;
+    }
+    const fallbackFunction = Reflect.construct(
+      NativeFunction,
+      ["__jsvmGlobal"].concat(params, `with (__jsvmGlobal) {\n${body}\n}`)
+    );
+    const runtimeFunction = function runtimeFunctionInvoker() {
+      "use strict";
+      const callArgs = new Array(arguments.length);
+      for (let index = 0; index < arguments.length; index += 1) {
+        callArgs[index] = arguments[index];
+      }
+      if (usesRuntimeGlobal || usesRuntimeThis) {
+        return callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, this, callArgs, isStrictBody);
+      }
+      try {
+        return nativeFunction.apply(this, callArgs);
+      } catch (error) {
+        if (!(error instanceof ReferenceError)) {
+          throw error;
+        }
+        return callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, this, callArgs, isStrictBody);
+      }
+    };
+    mirrorDynamicFunctionShape(runtimeFunction, nativeFunction, dynamicFunctionPrototype);
+    Object.defineProperty(runtimeFunction, "name", {
+      value: "anonymous",
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+    Object.defineProperty(runtimeFunction, "length", {
+      value: params.length,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+    Object.defineProperty(runtimeFunction, "constructor", {
+      value: RuntimeFunction,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return runtimeFunction;
+  };
+
+  Object.defineProperty(RuntimeFunction, "__jsvmRuntimeFunctionConstructor", {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.setPrototypeOf(RuntimeFunction, NativeFunction);
+  Object.defineProperty(RuntimeFunction, "prototype", {
+    value: NativeFunction.prototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  Object.defineProperty(RuntimeFunction, "length", {
+    value: 1,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(runtimeGlobal, "Function", {
+    value: RuntimeFunction,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function getDynamicFunctionObjectPrototype(newTarget, fallbackPrototype) {
+  const explicitPrototype = newTarget && newTarget.prototype;
+  if (explicitPrototype !== null && explicitPrototype !== undefined
+    && (typeof explicitPrototype === "object" || typeof explicitPrototype === "function")) {
+    return explicitPrototype;
+  }
+  const inheritedPrototype = newTarget ? Object.getPrototypeOf(newTarget) : null;
+  if (inheritedPrototype !== null && inheritedPrototype !== undefined
+    && (typeof inheritedPrototype === "object" || typeof inheritedPrototype === "function")) {
+    return inheritedPrototype;
+  }
+  return fallbackPrototype;
+}
+
+function mirrorDynamicFunctionShape(target, source, functionPrototype) {
+  Object.setPrototypeOf(target, functionPrototype);
+  const prototypeDescriptor = Object.getOwnPropertyDescriptor(source, "prototype");
+  if (prototypeDescriptor) {
+    Object.defineProperty(target, "prototype", prototypeDescriptor);
+  }
+}
+
+function referencesRuntimeGlobalBinding(runtimeGlobal, source) {
+  const bindings = runtimeGlobal.__jsvmGlobalBindings;
+  if (!bindings || typeof bindings[Symbol.iterator] !== "function") {
+    return false;
+  }
+  for (const name of bindings) {
+    if (new RegExp(`\\b${escapeRegExp(String(name))}\\b`).test(source)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, thisArg, callArgs, isStrictBody) {
+  const stack = runtimeGlobal.__jsvmFunctionCallStack;
+  const boundary = stack && typeof stack.push === "function"
+    ? { fn: null, meta: { strictMode: Boolean(isStrictBody) }, hostFunctionBoundary: true }
+    : null;
+  const effectiveThis = thisArg === null || thisArg === undefined ? runtimeGlobal : thisArg;
+  if (boundary) {
+    internalPush(stack, boundary);
+  }
+  if (!isStrictBody) {
+    try {
+      return fallbackFunction.apply(effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
+    } finally {
+      if (boundary) {
+        popRuntimeFunctionBoundary(stack, boundary);
+      }
+    }
+  }
+
+  runtimeGlobal.__jsvmStrictHostFunctionDepth = (runtimeGlobal.__jsvmStrictHostFunctionDepth || 0) + 1;
+  try {
+    return fallbackFunction.apply(effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
+  } finally {
+    runtimeGlobal.__jsvmStrictHostFunctionDepth -= 1;
+    if (boundary) {
+      popRuntimeFunctionBoundary(stack, boundary);
+    }
+  }
+}
+
+function popRuntimeFunctionBoundary(stack, boundary) {
+  const index = stack.lastIndexOf(boundary);
+  if (index >= 0) {
+    internalRemoveAt(stack, index);
+  }
+}
+
+function hasUseStrictSourceDirective(source) {
+  const trimmed = String(source).trimStart();
+  return trimmed.startsWith('"use strict"') || trimmed.startsWith("'use strict'");
+}
+
+function prependRuntimeGlobal(runtimeGlobal, values) {
+  const result = new Array(values.length + 1);
+  result[0] = runtimeGlobal;
+  for (let index = 0; index < values.length; index += 1) {
+    result[index + 1] = values[index];
+  }
+  return result;
 }
 
 function createArgumentsObject(args) {
   return function makeArgumentsObject() {
     return arguments;
   }.apply(null, args);
+}
+
+function normalizeRestrictedFunctionProperties(runtimeGlobal) {
+  const FunctionCtor = runtimeGlobal.Function;
+  if (typeof FunctionCtor !== "function" || !FunctionCtor.prototype) {
+    return;
+  }
+
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  const thrower = createNonConstructorMethod(function throwTypeError() {
+    throw new TypeErrorCtor("Restricted function property access");
+  }, 0);
+  defineBuiltinFunctionMetadata(thrower, "", 0);
+
+  for (const name of ["caller", "arguments"]) {
+    Object.defineProperty(FunctionCtor.prototype, name, {
+      get: thrower,
+      set: thrower,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }
 
 function normalizeLegacyEscape(runtimeGlobal) {
@@ -1378,8 +1812,10 @@ function isNativeArrayConstructor(value, defaultArrayCtor = Array) {
     return false;
   }
 
+  const nativeValue = value.__jsvmNativeArrayConstructor || value;
+  const nativeDefault = defaultArrayCtor.__jsvmNativeArrayConstructor || defaultArrayCtor;
   try {
-    return Function.prototype.toString.call(value) === Function.prototype.toString.call(defaultArrayCtor);
+    return Function.prototype.toString.call(nativeValue) === Function.prototype.toString.call(nativeDefault);
   } catch {
     return false;
   }
@@ -1659,6 +2095,52 @@ function normalizeArrayBufferExtensions(runtimeGlobal) {
   }
 }
 
+const DATA_VIEW_SETTER_NAMES = [
+  "setBigInt64",
+  "setBigUint64",
+  "setFloat16",
+  "setFloat32",
+  "setFloat64",
+  "setInt8",
+  "setInt16",
+  "setInt32",
+  "setUint8",
+  "setUint16",
+  "setUint32",
+];
+
+function normalizeDataViewImmutableSetters(runtimeGlobal) {
+  const DataViewCtor = runtimeGlobal.DataView;
+  if (typeof DataViewCtor !== "function" || !DataViewCtor.prototype) {
+    return;
+  }
+
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  for (const methodName of DATA_VIEW_SETTER_NAMES) {
+    const nativeMethod = DataViewCtor.prototype[methodName];
+    if (typeof nativeMethod !== "function") {
+      continue;
+    }
+
+    const method = createNonConstructorMethod(function dataViewSetter(...args) {
+      if (!(this instanceof DataViewCtor)) {
+        return nativeMethod.apply(this, args);
+      }
+      if (immutableArrayBuffers.has(this.buffer)) {
+        throw new TypeErrorCtor("Cannot write to an immutable ArrayBuffer");
+      }
+      return nativeMethod.apply(this, args);
+    }, nativeMethod.length);
+    defineBuiltinFunctionMetadata(method, methodName, nativeMethod.length);
+    Object.defineProperty(DataViewCtor.prototype, methodName, {
+      value: method,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
 function requireArrayBufferReceiver(value, TypeErrorCtor, methodName) {
   if (!(value instanceof ArrayBuffer)) {
     throw new TypeErrorCtor(`ArrayBuffer.prototype.${methodName} called on incompatible receiver`);
@@ -1671,6 +2153,133 @@ function normalizeArrayBufferNewLength(newLength) {
   }
 
   return toIndexValue(newLength);
+}
+
+function normalizeAtomicsBuiltins(runtimeGlobal) {
+  const sourceAtomics = runtimeGlobal.Atomics;
+  if (!sourceAtomics || typeof sourceAtomics.notify !== "function") {
+    return;
+  }
+
+  const atomics = Object.create(Object.getPrototypeOf(sourceAtomics));
+  cloneOwnProperties(atomics, sourceAtomics);
+  if (typeof Symbol === "function" && Symbol.toStringTag) {
+    const tagDescriptor = Object.getOwnPropertyDescriptor(sourceAtomics, Symbol.toStringTag);
+    if (tagDescriptor) {
+      Object.defineProperty(atomics, Symbol.toStringTag, tagDescriptor);
+    }
+  }
+  const nativeNotify = sourceAtomics.notify;
+  const notifyMethod = createNonConstructorMethod(function notify(typedArray, index, count) {
+    if (!isAtomicsNotifyTypedArray(typedArray, runtimeGlobal)) {
+      return nativeNotify.call(sourceAtomics, typedArray, index, count);
+    }
+
+    if (isDetachedArrayBufferValue(typedArray.buffer)) {
+      throw new TypeError("Cannot perform Atomics.notify on a detached ArrayBuffer");
+    }
+
+    const length = typedArray.length;
+    const accessIndex = toIndexValue(index);
+    if (accessIndex >= length) {
+      throw new RangeError("Invalid atomic access index");
+    }
+
+    if (count !== undefined) {
+      toIntegerOrInfinity(count);
+    }
+
+    if (!isSharedArrayBufferValue(typedArray.buffer, runtimeGlobal)) {
+      return 0;
+    }
+
+    return nativeNotify.call(sourceAtomics, typedArray, accessIndex, count);
+  }, nativeNotify.length);
+  defineBuiltinFunctionMetadata(notifyMethod, "notify", nativeNotify.length);
+  Object.defineProperty(atomics, "notify", {
+    value: notifyMethod,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  defineAtomicsWaitMethod(atomics, sourceAtomics, "wait", runtimeGlobal);
+  defineAtomicsWaitMethod(atomics, sourceAtomics, "waitAsync", runtimeGlobal);
+  Object.defineProperty(runtimeGlobal, "Atomics", {
+    value: atomics,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function defineAtomicsWaitMethod(atomics, sourceAtomics, methodName, runtimeGlobal) {
+  const nativeMethod = sourceAtomics[methodName];
+  if (typeof nativeMethod !== "function") {
+    return;
+  }
+
+  const method = createNonConstructorMethod(function atomicsWait(typedArray, index, value, timeout) {
+    if (!isAtomicsNotifyTypedArray(typedArray, runtimeGlobal)) {
+      return nativeMethod.call(sourceAtomics, typedArray, index, value, timeout);
+    }
+
+    if (isDetachedArrayBufferValue(typedArray.buffer)) {
+      throw new TypeError(`Cannot perform Atomics.${methodName} on a detached ArrayBuffer`);
+    }
+    if (!isSharedArrayBufferValue(typedArray.buffer, runtimeGlobal)) {
+      throw new TypeError(`[object ${typedArray.constructor.name}] is not a shared typed array.`);
+    }
+
+    const length = typedArray.length;
+    const accessIndex = toIndexValue(index);
+    if (accessIndex >= length) {
+      throw new RangeError("Invalid atomic access index");
+    }
+
+    if (methodName === "wait" && runtimeGlobal.__jsvmCanBlock === false) {
+      coerceAtomicsWaitValue(typedArray, value, runtimeGlobal);
+      coerceAtomicsWaitTimeout(timeout);
+      throw new TypeError("Agent cannot suspend");
+    }
+
+    return nativeMethod.call(sourceAtomics, typedArray, accessIndex, value, timeout);
+  }, nativeMethod.length);
+  defineBuiltinFunctionMetadata(method, methodName, nativeMethod.length);
+  Object.defineProperty(atomics, methodName, {
+    value: method,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function isAtomicsNotifyTypedArray(value, runtimeGlobal) {
+  if (typeof runtimeGlobal.Int32Array === "function" && value instanceof runtimeGlobal.Int32Array) {
+    return true;
+  }
+  return typeof runtimeGlobal.BigInt64Array === "function" && value instanceof runtimeGlobal.BigInt64Array;
+}
+
+function isSharedArrayBufferValue(value, runtimeGlobal) {
+  return typeof runtimeGlobal.SharedArrayBuffer === "function" && value instanceof runtimeGlobal.SharedArrayBuffer;
+}
+
+function isDetachedArrayBufferValue(value) {
+  return Boolean(value && value.detached === true);
+}
+
+function coerceAtomicsWaitValue(typedArray, value, runtimeGlobal) {
+  if (typeof runtimeGlobal.BigInt64Array === "function" && typedArray instanceof runtimeGlobal.BigInt64Array) {
+    BigInt(value);
+    return;
+  }
+  Number(value);
+}
+
+function coerceAtomicsWaitTimeout(timeout) {
+  if (timeout !== undefined) {
+    Number(timeout);
+  }
 }
 
 function toIndexValue(value) {
@@ -2015,6 +2624,67 @@ function createTemporalInstantValue(epochNanoseconds, prototype) {
 
 function normalizeIteratorBuiltins(runtimeGlobal) {
   const IteratorCtor = getOrCreateIteratorIntrinsic(runtimeGlobal);
+  const wrapForValidIteratorPrototype = getOrCreateWrapForValidIteratorPrototype(IteratorCtor.prototype);
+  const from = createNonConstructorMethod(function from(value) {
+    const record = getIteratorFlattenableRecord(value, { requireNext: false });
+    if ((record.usedIteratorMethod && record.iterator === value) || prototypeChainIncludes(record.iterator, IteratorCtor.prototype)) {
+      return record.iterator;
+    }
+    return createIteratorFromHelper(record, wrapForValidIteratorPrototype);
+  }, 1);
+  defineBuiltinFunctionMetadata(from, "from", 1);
+
+  Object.defineProperty(IteratorCtor, "from", {
+    value: from,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  if (typeof IteratorCtor.prototype.toArray !== "function") {
+    const toArray = createNonConstructorMethod(function toArray() {
+      const record = getIteratorFlattenableRecord(this);
+      const result = [];
+      let nextIndex = 0;
+      while (true) {
+        const nextResult = record.nextMethod.call(record.iterator);
+        if (nextResult === null || nextResult === undefined || (typeof nextResult !== "object" && typeof nextResult !== "function")) {
+          throw new TypeError("Iterator result is not an object");
+        }
+        if (nextResult.done) {
+          return result;
+        }
+        defineOwnArrayElement(result, nextIndex, nextResult.value);
+        nextIndex += 1;
+      }
+    }, 0);
+    defineBuiltinFunctionMetadata(toArray, "toArray", 0);
+
+    Object.defineProperty(IteratorCtor.prototype, "toArray", {
+      value: toArray,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (typeof IteratorCtor.prototype.drop !== "function") {
+    const drop = createNonConstructorMethod(function drop(limit) {
+      const record = getIteratorDirectRecord(this);
+      const remaining = normalizeIteratorDropLimit(limit);
+      return createIteratorDropHelper(record, remaining, IteratorCtor.prototype);
+    }, 1);
+    defineBuiltinFunctionMetadata(drop, "drop", 1);
+
+    Object.defineProperty(IteratorCtor.prototype, "drop", {
+      value: drop,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  normalizeGeneratorIteratorPrototype(IteratorCtor.prototype);
+
   if (typeof IteratorCtor.concat !== "function") {
     const concat = createNonConstructorMethod(function concat(...items) {
       const records = items.map((item) => {
@@ -2055,6 +2725,17 @@ function normalizeIteratorBuiltins(runtimeGlobal) {
       enumerable: false,
       configurable: true,
     });
+  }
+}
+
+function normalizeGeneratorIteratorPrototype(iteratorPrototype) {
+  const generatorPrototype = Object.getPrototypeOf(function* generator() {}());
+  if (
+    generatorPrototype
+    && typeof generatorPrototype === "object"
+    && !prototypeChainIncludes(generatorPrototype, iteratorPrototype)
+  ) {
+    Object.setPrototypeOf(generatorPrototype, iteratorPrototype);
   }
 }
 
@@ -2249,20 +2930,24 @@ function createZipKeyedRecords(iterables, options) {
   return { mode, records };
 }
 
-function getIteratorFlattenableRecord(value) {
-  if (value === null || value === undefined || (typeof value !== "object" && typeof value !== "function")) {
+function getIteratorFlattenableRecord(value, options = {}) {
+  const requireNext = options.requireNext !== false;
+  const isStringPrimitive = typeof value === "string";
+  if (value === null || value === undefined || (!isStringPrimitive && typeof value !== "object" && typeof value !== "function")) {
     throw new TypeError("Iterator.zipKeyed requires object or iterator values");
   }
 
   const method = value[Symbol.iterator];
   let iterator;
-  if (method === undefined) {
+  let usedIteratorMethod = false;
+  if (method === undefined || method === null) {
     iterator = value;
   } else {
-    if (method === null || typeof method !== "function") {
+    if (typeof method !== "function") {
       throw new TypeError("Iterator.zipKeyed requires a callable @@iterator method");
     }
     iterator = method.call(value);
+    usedIteratorMethod = true;
   }
 
   if (iterator === null || iterator === undefined || (typeof iterator !== "object" && typeof iterator !== "function")) {
@@ -2270,11 +2955,162 @@ function getIteratorFlattenableRecord(value) {
   }
 
   const nextMethod = iterator.next;
-  if (typeof nextMethod !== "function") {
+  if (requireNext && typeof nextMethod !== "function") {
     throw new TypeError("Iterator.zipKeyed expected a callable next method");
   }
 
-  return { iterator, nextMethod };
+  return { iterator, nextMethod, usedIteratorMethod };
+}
+
+function getIteratorDirectRecord(value) {
+  if (value === null || value === undefined || (typeof value !== "object" && typeof value !== "function")) {
+    throw new TypeError("Iterator helper receiver must be an object");
+  }
+  const nextMethod = value.next;
+  if (typeof nextMethod !== "function") {
+    throw new TypeError("Iterator helper receiver must have a callable next method");
+  }
+  return { iterator: value, nextMethod };
+}
+
+function normalizeIteratorDropLimit(limit) {
+  const number = Number(limit);
+  if (Number.isNaN(number)) {
+    throw new RangeError("Iterator.prototype.drop limit must not be NaN");
+  }
+  const integer = toIntegerOrInfinity(number);
+  if (integer < 0) {
+    throw new RangeError("Iterator.prototype.drop limit must be non-negative");
+  }
+  return integer;
+}
+
+function getOrCreateWrapForValidIteratorPrototype(iteratorPrototype) {
+  if (iteratorPrototype.__jsvmWrapForValidIteratorPrototype) {
+    return iteratorPrototype.__jsvmWrapForValidIteratorPrototype;
+  }
+
+  const prototype = Object.create(iteratorPrototype);
+  Object.defineProperty(iteratorPrototype, "__jsvmWrapForValidIteratorPrototype", {
+    value: prototype,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return prototype;
+}
+
+function createIteratorFromHelper(record, iteratorPrototype) {
+  const helper = Object.create(iteratorPrototype);
+  Object.defineProperty(helper, "next", {
+    value: createNonConstructorMethod(function next() {
+      if (typeof record.nextMethod !== "function") {
+        throw new TypeError("Iterator.from expected a callable next method");
+      }
+      return record.nextMethod.call(record.iterator);
+    }, 0),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(helper, "return", {
+    value: createNonConstructorMethod(function iteratorReturn() {
+      const returnMethod = record.iterator.return;
+      if (returnMethod === undefined || returnMethod === null) {
+        return { value: undefined, done: true };
+      }
+      if (typeof returnMethod !== "function") {
+        throw new TypeError("Iterator return method is not callable");
+      }
+      const result = returnMethod.call(record.iterator);
+      if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+        throw new TypeError("Iterator return result is not an object");
+      }
+      return result;
+    }, 0),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return helper;
+}
+
+function createIteratorDropHelper(record, remaining, iteratorPrototype) {
+  const state = {
+    remaining,
+    done: false,
+    executing: false,
+  };
+  const helper = Object.create(iteratorPrototype);
+
+  Object.defineProperty(helper, "next", {
+    value: createNonConstructorMethod(function next() {
+      if (state.executing) {
+        throw new TypeError("Iterator helper is already executing");
+      }
+      if (state.done) {
+        return { value: undefined, done: true };
+      }
+
+      state.executing = true;
+      try {
+        while (state.remaining > 0) {
+          const skipped = record.nextMethod.call(record.iterator);
+          if (skipped === null || skipped === undefined || (typeof skipped !== "object" && typeof skipped !== "function")) {
+            throw new TypeError("Iterator result is not an object");
+          }
+          if (skipped.done) {
+            state.done = true;
+            return { value: undefined, done: true };
+          }
+          state.remaining -= 1;
+        }
+
+        const result = record.nextMethod.call(record.iterator);
+        if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+          throw new TypeError("Iterator result is not an object");
+        }
+        if (result.done) {
+          state.done = true;
+        }
+        return result;
+      } finally {
+        state.executing = false;
+      }
+    }, 0),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(helper, "return", {
+    value: createNonConstructorMethod(function iteratorReturn() {
+      if (state.executing) {
+        throw new TypeError("Iterator helper is already executing");
+      }
+      if (state.done) {
+        return { value: undefined, done: true };
+      }
+      state.done = true;
+      const returnMethod = record.iterator.return;
+      if (returnMethod === undefined || returnMethod === null) {
+        return { value: undefined, done: true };
+      }
+      if (typeof returnMethod !== "function") {
+        throw new TypeError("Iterator return method is not callable");
+      }
+      const result = returnMethod.call(record.iterator);
+      if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+        throw new TypeError("Iterator return result is not an object");
+      }
+      return result;
+    }, 0),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  return helper;
 }
 
 function closeOpenIterators(records, completionError = null) {

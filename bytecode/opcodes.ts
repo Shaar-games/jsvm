@@ -75,7 +75,12 @@ const OP_NAMES = [
   "SETMETHOD",
   "EQ",
   "NE",
-  "LOAD_NEW_TARGET"
+  "LOAD_NEW_TARGET",
+  "GETASYNCITER",
+  "ASYNCITERNEXT",
+  "TYPEOFNAME",
+  "DEFINEFIELD",
+  "DELETEFIELD"
 ];
 
 const OpCode = OP_NAMES.reduce((map, name, index) => {

@@ -16,11 +16,13 @@ async function compileForOfStatement(node, context) {
   const valueRegister = newRegister(context);
   const loopLabel = makeLabel(context, "FOROF");
   const endLabel = makeLabel(context, "ENDFOROF");
+  const getIteratorOp = node.await ? OpCode.GETASYNCITER : OpCode.GETITER;
+  const nextOp = node.await ? OpCode.ASYNCITERNEXT : OpCode.ITERNEXT;
 
-  emit(context, [OpCode.GETITER, iteratorRegister, iterableRegister]);
+  emit(context, [getIteratorOp, iteratorRegister, iterableRegister]);
   pushControlLabel(context, { continueLabel: loopLabel, breakLabel: endLabel });
   emitLabel(context, loopLabel);
-  emit(context, [OpCode.ITERNEXT, doneRegister, valueRegister, iteratorRegister]);
+  emit(context, [nextOp, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);
 
   if (isWebCompatCallAssignmentTarget(node.left, context)) {

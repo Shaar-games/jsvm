@@ -94,10 +94,12 @@ assert.throws = function throwsAssert(expectedErrorConstructor, callback, messag
       throw new Test262Error(message || "Thrown value was not an object");
     }
 
-    if (error.constructor !== expectedErrorConstructor) {
+    const expectedName = expectedErrorConstructor && expectedErrorConstructor.name;
+    const actualName = error.constructor && error.constructor.name;
+    if (error.constructor !== expectedErrorConstructor && error.name !== expectedName) {
       throw new Test262Error(
         message ||
-          `Expected ${expectedErrorConstructor && expectedErrorConstructor.name}, got ${error.constructor && error.constructor.name}`
+          `Expected ${expectedName}, got ${actualName || error.name}`
       );
     }
 
@@ -204,6 +206,12 @@ function createTest262Harness(options = {}) {
     }
   }
 
+  function verifyEqualTo(obj, name, value) {
+    if (!isSameValue(obj[name], value)) {
+      throw new Test262Error(`Expected obj[${String(name)}] to equal ${formatValue(value)}, actually ${formatValue(obj[name])}`);
+    }
+  }
+
   function verifyWritable(obj, name, verifyProp, value) {
     if (!verifyProp) {
       const desc = descriptorOf(obj, name);
@@ -300,6 +308,7 @@ function createTest262Harness(options = {}) {
     assert,
     compareArray,
     verifyProperty,
+    verifyEqualTo,
     verifyPrimordialProperty: verifyProperty,
     verifyWritable,
     verifyNotWritable,
