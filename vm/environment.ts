@@ -1,4 +1,6 @@
 // @ts-nocheck
+const { defineDataProperty } = require("./descriptors");
+
 const TDZ = Symbol.for("jsvm.tdz");
 
 function createEnvironment() {
@@ -35,12 +37,7 @@ function storeBinding(envStack, depth, slot, value) {
 }
 
 function defineOwnIndexedValue(target, index, value) {
-  Object.defineProperty(target, index, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(target, index, value);
 }
 
 module.exports = {

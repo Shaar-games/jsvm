@@ -2,35 +2,31 @@
 const acorn = require("acorn");
 const path = require("path");
 const fs = require("fs");
+const nodeVm = require("vm");
 const { createEnvironment, getBinding, initBinding, storeBinding, TDZ } = require("./environment");
 const { createRegisters, getRegister, setRegister } = require("./registers");
 const { executeInstruction, executeInstructionSync } = require("./handlers");
 const { buildFunctionTable, parseBytecode } = require("./parser");
+const { getSpecialFunctionConstructors } = require("./intrinsics");
+const {
+  createDataDescriptor,
+  defineDataProperty,
+} = require("./descriptors");
+
+let activeRuntimeFunctionPrototype = null;
+const hostReflectApply = Reflect.apply;
+const hostReflectConstruct = Reflect.construct;
+const shadowRealmStates = new WeakMap();
 
 function internalUnshift(array, value) {
   for (let index = array.length; index > 0; index -= 1) {
-    Object.defineProperty(array, index, {
-      value: array[index - 1],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    defineDataProperty(array, index, array[index - 1]);
   }
-  Object.defineProperty(array, 0, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(array, 0, value);
 }
 
 function internalPush(array, value) {
-  Object.defineProperty(array, array.length, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(array, array.length, value);
 }
 
 function internalRemoveAt(array, index) {
@@ -38,12 +34,7 @@ function internalRemoveAt(array, index) {
     return;
   }
   for (let current = index + 1; current < array.length; current += 1) {
-    Object.defineProperty(array, current - 1, {
-      value: array[current],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    defineDataProperty(array, current - 1, array[current]);
   }
   array.length -= 1;
 }
@@ -54,12 +45,7 @@ function internalShift(array) {
   }
   const value = array[0];
   for (let index = 1; index < array.length; index += 1) {
-    Object.defineProperty(array, index - 1, {
-      value: array[index],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    defineDataProperty(array, index - 1, array[index]);
   }
   array.length -= 1;
   return value;
@@ -81,35 +67,20 @@ class BytecodeVM {
     this.staticValues = (program.staticSection && program.staticSection.values) || [];
     this.globalObject = options.runtimeGlobal || buildRuntimeEnv(options.env || options.globals || {});
     this.env = this.globalObject;
-    Object.defineProperty(this.globalObject, "__jsvmFunctionCallStack", {
-      value: this.functionCallStack,
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+    defineDataProperty(this.globalObject, "__jsvmFunctionCallStack", this.functionCallStack, true, false, true);
     if (!this.globalObject.eval || !this.globalObject.eval.__jsvmDirectEval) {
       const directEval = function jsvmEval() {
         throw new Error("Direct eval interception should be handled by the VM call dispatcher");
       };
       directEval.__jsvmDirectEval = true;
-      Object.defineProperty(this.globalObject, "eval", {
-        value: directEval,
-        writable: true,
-        enumerable: false,
-        configurable: true,
-      });
+      defineDataProperty(this.globalObject, "eval", directEval, true, false, true);
     }
     if (!this.globalObject.require || !this.globalObject.require.__jsvmRequire) {
       const directRequire = function jsvmRequire() {
         throw new Error("Require interception should be handled by the VM call dispatcher");
       };
       directRequire.__jsvmRequire = true;
-      Object.defineProperty(this.globalObject, "require", {
-        value: directRequire,
-        writable: true,
-        enumerable: false,
-        configurable: true,
-      });
+      defineDataProperty(this.globalObject, "require", directRequire, true, false, true);
     }
   }
 
@@ -188,8 +159,25 @@ class BytecodeVM {
       bindingNameStack: execState.bindingNameStack,
       registers: execState.registers,
       labels,
-      thisValue: execState.thisValue,
+      get thisValue() {
+        return execState.thisValue;
+      },
+      set thisValue(value) {
+        execState.thisValue = value;
+      },
       newTarget: execState.newTarget,
+      get homeClass() {
+        return execState.homeClass;
+      },
+      set homeClass(value) {
+        execState.homeClass = value;
+      },
+      get superClass() {
+        return execState.superClass;
+      },
+      set superClass(value) {
+        execState.superClass = value;
+      },
       tryStack: execState.tryStack,
       withStack: execState.withStack,
       exports: execState.exports,
@@ -832,12 +820,12 @@ class BytecodeVM {
   async loadModule(specifier, options = {}) {
     const mode = options.mode || "import";
     const parentFilename = options.parentFilename || this.filename;
-    const cacheKey = `${mode}:${parentFilename || "<root>"}:${specifier}`;
-    if (this.moduleCache.has(cacheKey)) {
-      return this.moduleCache.get(cacheKey);
-    }
 
     if (Object.prototype.hasOwnProperty.call(this.moduleOverrides, specifier)) {
+      const cacheKey = `${mode}:override:${specifier}`;
+      if (this.moduleCache.has(cacheKey)) {
+        return this.moduleCache.get(cacheKey);
+      }
       const overrideValue = this.moduleOverrides[specifier];
       const normalized = mode === "import"
         ? normalizeModuleNamespace(overrideValue, specifier)
@@ -848,10 +836,19 @@ class BytecodeVM {
 
     const resolvedPath = this.resolveModulePath(specifier, parentFilename);
     if (!resolvedPath) {
+      const cacheKey = `${mode}:external:${specifier}`;
+      if (this.moduleCache.has(cacheKey)) {
+        return this.moduleCache.get(cacheKey);
+      }
       const fallback = this.resolveExternalModule(specifier);
       const normalized = mode === "import" ? fallback : ("default" in fallback ? fallback.default : fallback);
       this.moduleCache.set(cacheKey, normalized);
       return normalized;
+    }
+
+    const cacheKey = `${mode}:${resolvedPath}`;
+    if (this.moduleCache.has(cacheKey)) {
+      return this.moduleCache.get(cacheKey);
     }
 
     if (resolvedPath.endsWith(".json")) {
@@ -885,10 +882,16 @@ class BytecodeVM {
     });
 
     let result;
+    let moduleExports = null;
+    let moduleNamespace = null;
     if (sourceType === "module") {
+      moduleExports = {};
+      moduleNamespace = createModuleNamespace(moduleExports, resolvedPath, collectModuleExportNames(source));
+      this.moduleCache.set(cacheKey, mode === "import" ? moduleNamespace : moduleExports);
       await childVm.execute();
-      result = childVm.lastExports || {};
-      result = mode === "import" ? normalizeModuleNamespace(result, resolvedPath) : result;
+      Object.assign(moduleExports, childVm.lastExports || {});
+      finalizeModuleNamespace(moduleNamespace, moduleExports);
+      result = mode === "import" ? moduleNamespace : moduleExports;
     } else {
       if (mode === "require" && options.state && !looksLikeCommonJs(source)) {
         result = await childVm.executeScriptInCallerScope(options.state);
@@ -943,7 +946,7 @@ class BytecodeVM {
     internalPush(this.functionCallStack, frame);
     try {
       const result = executor();
-      if (result && typeof result.then === "function") {
+      if (result && typeof result.then === "function" && typeof result.finally === "function") {
         return result.finally(() => {
           this.popFunctionCallFrame(frame);
         });
@@ -1161,48 +1164,37 @@ function buildRuntimeEnv(extraEnv = {}) {
   const runtimeGlobal = {};
   cloneOwnProperties(runtimeGlobal, globalThis);
   cloneOwnProperties(runtimeGlobal, extraEnv);
-  Object.defineProperty(runtimeGlobal, "global", {
-    value: runtimeGlobal,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(runtimeGlobal, "globalThis", {
-    value: runtimeGlobal,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(runtimeGlobal, "self", {
-    value: runtimeGlobal,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(runtimeGlobal, "__jsvmStrictHostFunctionDepth", {
-    value: 0,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(runtimeGlobal, "__jsvmGlobalBindings", {
-    value: new Set(),
-    writable: false,
-    enumerable: false,
-    configurable: true,
-  });
+  defineDataProperty(runtimeGlobal, "global", runtimeGlobal, true, false, true);
+  defineDataProperty(runtimeGlobal, "globalThis", runtimeGlobal, true, false, true);
+  defineDataProperty(runtimeGlobal, "self", runtimeGlobal, true, false, true);
+  defineDataProperty(runtimeGlobal, "__jsvmStrictHostFunctionDepth", 0, true, false, true);
+  defineDataProperty(runtimeGlobal, "__jsvmGlobalBindings", new Set(), false, false, true);
+  defineDataProperty(runtimeGlobal, "__jsvmForInKeys", collectForInKeys, true, false, true);
   if (typeof runtimeGlobal.fnGlobalObject !== "function") {
-    Object.defineProperty(runtimeGlobal, "fnGlobalObject", {
-      value() {
+    defineDataProperty(
+      runtimeGlobal,
+      "fnGlobalObject",
+      function fnGlobalObject() {
         return runtimeGlobal;
       },
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
+      true,
+      false,
+      true
+    );
   }
   normalizeLegacyBuiltins(runtimeGlobal);
   return runtimeGlobal;
+}
+
+function collectForInKeys(value) {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  const result = [];
+  for (const key in Object(value)) {
+    internalPush(result, key);
+  }
+  return result;
 }
 
 function createDirectEvalRunner(bindingNames) {
@@ -1364,18 +1356,22 @@ function collectBoundNames(patternNode, names) {
   }
 }
 
-function cloneOwnProperties(target, source) {
+function cloneOwnProperties(target, source, excludedKeys = null) {
   if (!source || (typeof source !== "object" && typeof source !== "function")) {
     return;
   }
 
   for (const key of Reflect.ownKeys(source)) {
-    if (typeof key !== "string") {
+    if (excludedKeys && excludedKeys.has(key)) {
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    if (!descriptor) {
       continue;
     }
 
-    const descriptor = Object.getOwnPropertyDescriptor(source, key);
-    if (!descriptor) {
+    if (typeof key !== "string") {
+      Object.defineProperty(target, key, descriptor);
       continue;
     }
 
@@ -1405,9 +1401,15 @@ function cloneOwnProperties(target, source) {
 function normalizeLegacyBuiltins(runtimeGlobal) {
   normalizeRuntimeArrayConstructor(runtimeGlobal);
   normalizeRuntimeFunctionConstructor(runtimeGlobal);
+  normalizeRuntimeStringConstructor(runtimeGlobal);
+  normalizeObjectBuiltins(runtimeGlobal);
   normalizeLegacyEscape(runtimeGlobal);
   normalizeRestrictedFunctionProperties(runtimeGlobal);
   normalizeArrayBuiltins(runtimeGlobal);
+  normalizeMathBuiltins(runtimeGlobal);
+  normalizePromiseBuiltins(runtimeGlobal);
+  normalizeMapBuiltins(runtimeGlobal);
+  normalizeWeakMapBuiltins(runtimeGlobal);
   normalizeLegacyStringHtmlMethods(runtimeGlobal);
   normalizeLegacyRegExpAccessors(runtimeGlobal);
   normalizeLegacyRegExpCompile(runtimeGlobal);
@@ -1416,6 +1418,7 @@ function normalizeLegacyBuiltins(runtimeGlobal) {
   normalizeAtomicsBuiltins(runtimeGlobal);
   normalizeTemporalBuiltins(runtimeGlobal);
   normalizeIteratorBuiltins(runtimeGlobal);
+  normalizeShadowRealmBuiltin(runtimeGlobal);
 }
 
 function normalizeRuntimeArrayConstructor(runtimeGlobal) {
@@ -1428,9 +1431,9 @@ function normalizeRuntimeArrayConstructor(runtimeGlobal) {
     const args = arguments;
     if (new.target) {
       const arrayNewTarget = new.target === RuntimeArray ? NativeArray : new.target;
-      return Reflect.construct(NativeArray, args, arrayNewTarget);
+      return hostReflectConstruct(NativeArray, args, arrayNewTarget);
     }
-    return NativeArray.apply(null, args);
+    return hostReflectApply(NativeArray, null, args);
   };
 
   cloneOwnProperties(RuntimeArray, NativeArray);
@@ -1485,13 +1488,13 @@ function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
     const usesRuntimeThis = !isStrictBody && /\bthis\b/.test(body);
     const functionArgs = params.concat(body);
     const functionNewTarget = new.target || RuntimeFunction;
-    const nativeFunction = Reflect.construct(NativeFunction, functionArgs, functionNewTarget);
-    const dynamicFunctionPrototype = getDynamicFunctionObjectPrototype(functionNewTarget, NativeFunction.prototype);
+    const nativeFunction = hostReflectConstruct(NativeFunction, functionArgs, functionNewTarget);
+    const dynamicFunctionPrototype = getDynamicFunctionObjectPrototype(functionNewTarget, runtimeFunctionPrototype);
     Object.setPrototypeOf(nativeFunction, dynamicFunctionPrototype);
     if (!usesRuntimeGlobal && !runtimeGlobal.__jsvmFunctionCallStack) {
       return nativeFunction;
     }
-    const fallbackFunction = Reflect.construct(
+    const fallbackFunction = hostReflectConstruct(
       NativeFunction,
       ["__jsvmGlobal"].concat(params, `with (__jsvmGlobal) {\n${body}\n}`)
     );
@@ -1505,7 +1508,7 @@ function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
         return callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, this, callArgs, isStrictBody);
       }
       try {
-        return nativeFunction.apply(this, callArgs);
+        return hostReflectApply(nativeFunction, this, callArgs);
       } catch (error) {
         if (!(error instanceof ReferenceError)) {
           throw error;
@@ -1534,6 +1537,12 @@ function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
     });
     return runtimeFunction;
   };
+  const runtimeFunctionPrototype = createRuntimeFunctionPrototype(
+    RuntimeFunction,
+    NativeFunction.prototype,
+    runtimeGlobal.Object && runtimeGlobal.Object.prototype ? runtimeGlobal.Object.prototype : Object.prototype
+  );
+  activeRuntimeFunctionPrototype = runtimeFunctionPrototype;
 
   Object.defineProperty(RuntimeFunction, "__jsvmRuntimeFunctionConstructor", {
     value: true,
@@ -1541,9 +1550,15 @@ function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
     enumerable: false,
     configurable: true,
   });
-  Object.setPrototypeOf(RuntimeFunction, NativeFunction);
+  Object.defineProperty(RuntimeFunction, "__jsvmNativeFunctionConstructor", {
+    value: NativeFunction.__jsvmNativeFunctionConstructor || NativeFunction,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.setPrototypeOf(RuntimeFunction, runtimeFunctionPrototype);
   Object.defineProperty(RuntimeFunction, "prototype", {
-    value: NativeFunction.prototype,
+    value: runtimeFunctionPrototype,
     writable: false,
     enumerable: false,
     configurable: false,
@@ -1561,6 +1576,387 @@ function normalizeRuntimeFunctionConstructor(runtimeGlobal) {
     enumerable: false,
     configurable: true,
   });
+  normalizeRuntimeFunctionPrototypeLinks(runtimeGlobal, NativeFunction.prototype, runtimeFunctionPrototype);
+  normalizeSpecialFunctionConstructors(runtimeGlobal, NativeFunction, RuntimeFunction);
+}
+
+function normalizeRuntimeStringConstructor(runtimeGlobal) {
+  const NativeString = runtimeGlobal.String || String;
+  if (typeof NativeString !== "function" || NativeString.__jsvmRuntimeStringConstructor) {
+    return;
+  }
+
+  const RuntimeString = function String(value) {
+    const stringValue = arguments.length === 0
+      ? ""
+      : (!new.target && typeof value === "symbol" ? NativeString(value) : toStringValue(value));
+    if (new.target) {
+      const stringNewTarget = new.target || RuntimeString;
+      return hostReflectConstruct(NativeString, [stringValue], stringNewTarget);
+    }
+    return stringValue;
+  };
+  const runtimeStringPrototype = Object.create(Object.getPrototypeOf(NativeString.prototype));
+  cloneOwnProperties(runtimeStringPrototype, NativeString.prototype);
+
+  cloneOwnProperties(RuntimeString, NativeString, new Set(["prototype"]));
+  Object.defineProperty(RuntimeString, "__jsvmRuntimeStringConstructor", {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(RuntimeString, "__jsvmNativeStringConstructor", {
+    value: NativeString.__jsvmNativeStringConstructor || NativeString,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.setPrototypeOf(RuntimeString, Object.getPrototypeOf(NativeString));
+  Object.defineProperty(RuntimeString, "prototype", {
+    value: runtimeStringPrototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  Object.defineProperty(runtimeStringPrototype, "constructor", {
+    value: RuntimeString,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(RuntimeString, "length", {
+    value: 1,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+
+  Object.defineProperty(runtimeGlobal, "String", {
+    value: RuntimeString,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  normalizeStringPatternBuiltins(runtimeGlobal, RuntimeString, NativeString);
+  normalizeStringMatchAllBuiltin(runtimeGlobal, RuntimeString, NativeString);
+}
+
+function normalizeStringPatternBuiltins(runtimeGlobal, StringCtor, NativeString) {
+  const RegExpCtor = runtimeGlobal.RegExp || RegExp;
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  const methods = [
+    ["match", Symbol.match, 1],
+    ["search", Symbol.search, 1],
+    ["replace", Symbol.replace, 2],
+    ["replaceAll", Symbol.replace, 2],
+    ["split", Symbol.split, 2],
+  ];
+
+  for (const [methodName, symbol, length] of methods) {
+    const nativeMethod = NativeString.prototype[methodName];
+    if (typeof nativeMethod !== "function") {
+      continue;
+    }
+    const method = createNonConstructorMethod(function stringPatternMethod(pattern, replacementOrLimit) {
+      if (this === null || this === undefined) {
+        throw new TypeErrorCtor(`String.prototype.${methodName} called on null or undefined`);
+      }
+      if (pattern !== null && pattern !== undefined && (typeof pattern === "object" || typeof pattern === "function")) {
+        if (methodName === "replaceAll" && isRegExpForStringPattern(pattern)) {
+          const flags = toStringValue(pattern.flags);
+          if (!stringContainsCodeUnit(flags, "g")) {
+            throw new TypeErrorCtor("String.prototype.replaceAll called with a non-global RegExp argument");
+          }
+        }
+        const symbolMethod = pattern[symbol];
+        if (symbolMethod !== null && symbolMethod !== undefined) {
+          if (typeof symbolMethod !== "function") {
+            throw new TypeErrorCtor(`${String(symbol)} is not callable`);
+          }
+          return length === 1
+            ? hostReflectApply(symbolMethod, pattern, [this])
+            : hostReflectApply(symbolMethod, pattern, [this, replacementOrLimit]);
+        }
+      }
+      const string = toStringValue(this);
+      const effectivePattern = pattern === null
+        || pattern === undefined
+        || (typeof pattern !== "object" && typeof pattern !== "function")
+        ? getStringPatternFallback(methodName, pattern, RegExpCtor)
+        : pattern;
+      return length === 1
+        ? hostReflectApply(nativeMethod, string, [effectivePattern])
+        : hostReflectApply(nativeMethod, string, [effectivePattern, replacementOrLimit]);
+    }, length);
+    defineBuiltinFunctionMetadata(method, methodName, length);
+    Object.defineProperty(StringCtor.prototype, methodName, {
+      value: method,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+function getStringPatternFallback(methodName, pattern, RegExpCtor) {
+  if (methodName === "match" || methodName === "search") {
+    return new RegExpCtor(pattern === undefined ? undefined : toStringValue(pattern));
+  }
+  if (methodName === "split" && pattern === undefined) {
+    return undefined;
+  }
+  return toStringValue(pattern);
+}
+
+function isRegExpForStringPattern(value) {
+  const matcher = value[Symbol.match];
+  if (matcher !== undefined) {
+    return Boolean(matcher);
+  }
+  return Object.prototype.toString.call(value) === "[object RegExp]";
+}
+
+function stringContainsCodeUnit(value, codeUnit) {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === codeUnit) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeStringMatchAllBuiltin(runtimeGlobal, StringCtor, NativeString) {
+  if (!StringCtor.prototype || typeof NativeString.prototype.matchAll !== "function") {
+    return;
+  }
+  const nativeMatchAll = NativeString.prototype.matchAll;
+  const RegExpCtor = runtimeGlobal.RegExp || RegExp;
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  const matchAll = createNonConstructorMethod(function matchAll(regexp) {
+    if (this === null || this === undefined) {
+      throw new TypeErrorCtor("String.prototype.matchAll called on null or undefined");
+    }
+    const string = toStringValue(this);
+    if (regexp === null || regexp === undefined || (typeof regexp !== "object" && typeof regexp !== "function")) {
+      return hostReflectApply(nativeMatchAll, string, [new RegExpCtor(regexp === undefined ? undefined : toStringValue(regexp), "g")]);
+    }
+    return hostReflectApply(nativeMatchAll, string, [regexp]);
+  }, 1);
+  defineBuiltinFunctionMetadata(matchAll, "matchAll", 1);
+  Object.defineProperty(StringCtor.prototype, "matchAll", {
+    value: matchAll,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function createRuntimeFunctionPrototype(RuntimeFunction, NativeFunctionPrototype, objectPrototype) {
+  const prototype = () => undefined;
+  cloneOwnProperties(prototype, NativeFunctionPrototype);
+  Object.setPrototypeOf(prototype, objectPrototype);
+  Object.defineProperty(prototype, "constructor", {
+    value: RuntimeFunction,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, "name", {
+    value: "",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, "length", {
+    value: 0,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return prototype;
+}
+
+function normalizeRuntimeFunctionPrototypeLinks(runtimeGlobal, nativeFunctionPrototype, runtimeFunctionPrototype) {
+  const seen = new WeakSet();
+  const queue = [runtimeGlobal];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const object = queue[cursor];
+    if (
+      object === null
+      || object === undefined
+      || (typeof object !== "object" && typeof object !== "function")
+      || seen.has(object)
+    ) {
+      continue;
+    }
+    seen.add(object);
+    if (typeof object === "function") {
+      relinkRuntimeFunctionPrototype(object, nativeFunctionPrototype, runtimeFunctionPrototype);
+    }
+
+    let keys;
+    try {
+      keys = Reflect.ownKeys(object);
+    } catch {
+      continue;
+    }
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      if (!descriptor || !("value" in descriptor)) {
+        continue;
+      }
+      const value = descriptor.value;
+      if (typeof value === "function") {
+        relinkRuntimeFunctionPrototype(value, nativeFunctionPrototype, runtimeFunctionPrototype);
+      }
+      if (object === runtimeGlobal && !shouldTraverseRuntimeGlobalValue(key)) {
+        continue;
+      }
+      if (value !== null && value !== undefined && (typeof value === "object" || typeof value === "function")) {
+        queue[queue.length] = value;
+      }
+    }
+  }
+}
+
+const RUNTIME_FUNCTION_PROTOTYPE_TRAVERSAL_ROOTS = new Set([
+  "AggregateError",
+  "Array",
+  "ArrayBuffer",
+  "AsyncDisposableStack",
+  "Atomics",
+  "BigInt",
+  "BigInt64Array",
+  "BigUint64Array",
+  "Boolean",
+  "DataView",
+  "Date",
+  "DisposableStack",
+  "Error",
+  "EvalError",
+  "FinalizationRegistry",
+  "Float16Array",
+  "Float32Array",
+  "Float64Array",
+  "Function",
+  "Infinity",
+  "Intl",
+  "Iterator",
+  "JSON",
+  "Map",
+  "Math",
+  "NaN",
+  "Number",
+  "Object",
+  "Promise",
+  "Proxy",
+  "RangeError",
+  "ReferenceError",
+  "Reflect",
+  "RegExp",
+  "Set",
+  "SharedArrayBuffer",
+  "String",
+  "SuppressedError",
+  "Symbol",
+  "SyntaxError",
+  "Temporal",
+  "TypeError",
+  "URIError",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Uint16Array",
+  "Uint32Array",
+  "WeakMap",
+  "WeakRef",
+  "WeakSet",
+  "decodeURI",
+  "decodeURIComponent",
+  "encodeURI",
+  "encodeURIComponent",
+  "escape",
+  "eval",
+  "isFinite",
+  "isNaN",
+  "parseFloat",
+  "parseInt",
+  "unescape",
+]);
+
+function shouldTraverseRuntimeGlobalValue(key) {
+  return typeof key === "string" && RUNTIME_FUNCTION_PROTOTYPE_TRAVERSAL_ROOTS.has(key);
+}
+
+function relinkRuntimeFunctionPrototype(fn, nativeFunctionPrototype, runtimeFunctionPrototype) {
+  try {
+    if (Object.getPrototypeOf(fn) === nativeFunctionPrototype) {
+      Object.setPrototypeOf(fn, runtimeFunctionPrototype);
+    }
+  } catch {
+    // Some host-provided functions can reject prototype mutation; leave those linked to the host realm.
+  }
+}
+
+function normalizeObjectBuiltins(runtimeGlobal) {
+  const ObjectCtor = runtimeGlobal.Object;
+  const RuntimeFunction = runtimeGlobal.Function;
+  if (typeof ObjectCtor !== "function" || !ObjectCtor.getPrototypeOf || !RuntimeFunction || !RuntimeFunction.prototype) {
+    return;
+  }
+
+  const nativeGetPrototypeOf = ObjectCtor.getPrototypeOf;
+  const nativeFunctionPrototype = RuntimeFunction.__jsvmNativeFunctionConstructor
+    ? RuntimeFunction.__jsvmNativeFunctionConstructor.prototype
+    : Function.prototype;
+  if (nativeGetPrototypeOf.__jsvmRuntimeGetPrototypeOf) {
+    return;
+  }
+
+  const getPrototypeOf = createNonConstructorMethod(function getPrototypeOf(value) {
+    if (
+      ObjectCtor.prototype
+      && (value === runtimeGlobal
+        || (value && (typeof value === "object" || typeof value === "function") && value.globalThis === value && value.Object === ObjectCtor))
+    ) {
+      return ObjectCtor.prototype;
+    }
+    const prototype = nativeGetPrototypeOf(value);
+    if (
+      prototype === nativeFunctionPrototype
+      && value !== RuntimeFunction.prototype
+      && (typeof value === "function" || typeof value === "object")
+    ) {
+      return RuntimeFunction.prototype;
+    }
+    return prototype;
+  }, 1);
+  defineBuiltinFunctionMetadata(getPrototypeOf, "getPrototypeOf", 1);
+  defineDataProperty(getPrototypeOf, "__jsvmRuntimeGetPrototypeOf", true, false, false, true);
+  defineDataProperty(ObjectCtor, "getPrototypeOf", getPrototypeOf, true, false, true);
+}
+
+function normalizeSpecialFunctionConstructors(runtimeGlobal, NativeFunction, RuntimeFunction) {
+  const constructors = Object.values(getSpecialFunctionConstructors(runtimeGlobal, NativeFunction));
+
+  for (const Constructor of constructors) {
+    if (typeof Constructor !== "function") {
+      continue;
+    }
+    if (Object.getPrototypeOf(Constructor) !== RuntimeFunction) {
+      Object.setPrototypeOf(Constructor, RuntimeFunction);
+    }
+    const prototype = Constructor.prototype;
+    if (
+      prototype !== null
+      && prototype !== undefined
+      && (typeof prototype === "object" || typeof prototype === "function")
+      && Object.getPrototypeOf(prototype) !== RuntimeFunction.prototype
+    ) {
+      Object.setPrototypeOf(prototype, RuntimeFunction.prototype);
+    }
+  }
 }
 
 function getDynamicFunctionObjectPrototype(newTarget, fallbackPrototype) {
@@ -1613,7 +2009,7 @@ function callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, thisArg, c
   }
   if (!isStrictBody) {
     try {
-      return fallbackFunction.apply(effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
+      return hostReflectApply(fallbackFunction, effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
     } finally {
       if (boundary) {
         popRuntimeFunctionBoundary(stack, boundary);
@@ -1623,7 +2019,7 @@ function callRuntimeFunctionFallback(runtimeGlobal, fallbackFunction, thisArg, c
 
   runtimeGlobal.__jsvmStrictHostFunctionDepth = (runtimeGlobal.__jsvmStrictHostFunctionDepth || 0) + 1;
   try {
-    return fallbackFunction.apply(effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
+    return hostReflectApply(fallbackFunction, effectiveThis, prependRuntimeGlobal(runtimeGlobal, callArgs));
   } finally {
     runtimeGlobal.__jsvmStrictHostFunctionDepth -= 1;
     if (boundary) {
@@ -1654,9 +2050,9 @@ function prependRuntimeGlobal(runtimeGlobal, values) {
 }
 
 function createArgumentsObject(args) {
-  return function makeArgumentsObject() {
+  return hostReflectApply(function makeArgumentsObject() {
     return arguments;
-  }.apply(null, args);
+  }, null, args);
 }
 
 function normalizeRestrictedFunctionProperties(runtimeGlobal) {
@@ -1727,7 +2123,7 @@ function normalizeArrayBuiltins(runtimeGlobal) {
 
   const concat = createNonConstructorMethod(function concat(...items) {
     if (!shouldUseManualConcat(this, items)) {
-      return nativeConcat.apply(this, items);
+      return hostReflectApply(nativeConcat, this, items);
     }
     return performManualConcat(this, items, ArrayCtor);
   }, 1);
@@ -1735,6 +2131,94 @@ function normalizeArrayBuiltins(runtimeGlobal) {
 
   Object.defineProperty(ArrayCtor.prototype, "concat", {
     value: concat,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  const nativeFilter = typeof ArrayCtor.prototype.filter === "function"
+    ? ArrayCtor.prototype.filter
+    : null;
+  if (!nativeFilter) {
+    return;
+  }
+
+  const filter = createNonConstructorMethod(function filter(callbackFn, thisArg) {
+    if (!Array.isArray(this)) {
+      return nativeFilter.call(this, callbackFn, thisArg);
+    }
+    return performManualFilter(this, callbackFn, thisArg, ArrayCtor);
+  }, 1);
+  defineBuiltinFunctionMetadata(filter, "filter", 1);
+
+  Object.defineProperty(ArrayCtor.prototype, "filter", {
+    value: filter,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  const nativeMap = typeof ArrayCtor.prototype.map === "function"
+    ? ArrayCtor.prototype.map
+    : null;
+  if (!nativeMap) {
+    return;
+  }
+
+  const map = createNonConstructorMethod(function map(callbackFn, thisArg) {
+    if (!Array.isArray(this)) {
+      return nativeMap.call(this, callbackFn, thisArg);
+    }
+    return performManualMap(this, callbackFn, thisArg, ArrayCtor);
+  }, 1);
+  defineBuiltinFunctionMetadata(map, "map", 1);
+
+  Object.defineProperty(ArrayCtor.prototype, "map", {
+    value: map,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  const nativeSlice = typeof ArrayCtor.prototype.slice === "function"
+    ? ArrayCtor.prototype.slice
+    : null;
+  if (!nativeSlice) {
+    return;
+  }
+
+  const slice = createNonConstructorMethod(function slice(start, end) {
+    if (!Array.isArray(this)) {
+      return nativeSlice.call(this, start, end);
+    }
+    return performManualSlice(this, start, end, ArrayCtor);
+  }, 2);
+  defineBuiltinFunctionMetadata(slice, "slice", 2);
+
+  Object.defineProperty(ArrayCtor.prototype, "slice", {
+    value: slice,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+
+  const nativeSplice = typeof ArrayCtor.prototype.splice === "function"
+    ? ArrayCtor.prototype.splice
+    : null;
+  if (!nativeSplice) {
+    return;
+  }
+
+  const splice = createNonConstructorMethod(function splice(start, deleteCount) {
+    if (!Array.isArray(this)) {
+      return hostReflectApply(nativeSplice, this, arguments);
+    }
+    return performManualSplice(this, arguments, ArrayCtor);
+  }, 2);
+  defineBuiltinFunctionMetadata(splice, "splice", 2);
+
+  Object.defineProperty(ArrayCtor.prototype, "splice", {
+    value: splice,
     writable: true,
     enumerable: false,
     configurable: true,
@@ -1771,6 +2255,166 @@ function performManualConcat(receiver, items, defaultArrayCtor = Array) {
   }
 
   setArrayLikeLengthOrThrow(result, nextIndex);
+  return result;
+}
+
+function toLength(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return 0;
+  }
+  return Math.min(Math.floor(number), 0x1fffffffffffff);
+}
+
+function toIntegerOrInfinity(value) {
+  const number = Number(value);
+  if (Number.isNaN(number) || number === 0) {
+    return 0;
+  }
+  if (!Number.isFinite(number)) {
+    return number;
+  }
+  return number < 0 ? Math.ceil(number) : Math.floor(number);
+}
+
+function relativeStartIndex(value, length) {
+  const integer = toIntegerOrInfinity(value);
+  if (integer === -Infinity) {
+    return 0;
+  }
+  if (integer < 0) {
+    return Math.max(length + integer, 0);
+  }
+  return Math.min(integer, length);
+}
+
+function relativeEndIndex(value, length) {
+  if (value === undefined) {
+    return length;
+  }
+  return relativeStartIndex(value, length);
+}
+
+function performManualSlice(receiver, start, end, defaultArrayCtor = Array) {
+  const object = Object(receiver);
+  const length = toLength(object.length);
+  const from = relativeStartIndex(start, length);
+  const final = relativeEndIndex(end, length);
+  const count = Math.max(final - from, 0);
+  const result = arraySpeciesCreate(object, count, defaultArrayCtor);
+
+  let resultIndex = 0;
+  for (let index = from; index < final; index += 1) {
+    if (index in object) {
+      defineOwnArrayElement(result, resultIndex, object[index]);
+    }
+    resultIndex += 1;
+  }
+
+  setArrayLikeLengthOrThrow(result, count);
+  return result;
+}
+
+function performManualSplice(receiver, argsLike, defaultArrayCtor = Array) {
+  const object = Object(receiver);
+  const length = toLength(object.length);
+  const argumentCount = argsLike.length;
+  const actualStart = argumentCount === 0 ? 0 : relativeStartIndex(argsLike[0], length);
+  const insertCount = Math.max(argumentCount - 2, 0);
+  let actualDeleteCount;
+
+  if (argumentCount === 0) {
+    actualDeleteCount = 0;
+  } else if (argumentCount === 1) {
+    actualDeleteCount = length - actualStart;
+  } else {
+    actualDeleteCount = Math.min(Math.max(toIntegerOrInfinity(argsLike[1]), 0), length - actualStart);
+  }
+
+  const result = arraySpeciesCreate(object, actualDeleteCount, defaultArrayCtor);
+  for (let index = 0; index < actualDeleteCount; index += 1) {
+    const fromIndex = actualStart + index;
+    if (fromIndex in object) {
+      defineOwnArrayElement(result, index, object[fromIndex]);
+    }
+  }
+  setArrayLikeLengthOrThrow(result, actualDeleteCount);
+
+  if (insertCount < actualDeleteCount) {
+    for (let index = actualStart; index < length - actualDeleteCount; index += 1) {
+      const fromIndex = index + actualDeleteCount;
+      const toIndex = index + insertCount;
+      if (fromIndex in object) {
+        object[toIndex] = object[fromIndex];
+      } else {
+        delete object[toIndex];
+      }
+    }
+    for (let index = length; index > length - actualDeleteCount + insertCount; index -= 1) {
+      delete object[index - 1];
+    }
+  } else if (insertCount > actualDeleteCount) {
+    for (let index = length - actualDeleteCount; index > actualStart; index -= 1) {
+      const fromIndex = index + actualDeleteCount - 1;
+      const toIndex = index + insertCount - 1;
+      if (fromIndex in object) {
+        object[toIndex] = object[fromIndex];
+      } else {
+        delete object[toIndex];
+      }
+    }
+  }
+
+  for (let index = 0; index < insertCount; index += 1) {
+    object[actualStart + index] = argsLike[index + 2];
+  }
+
+  setArrayLikeLengthOrThrow(object, length - actualDeleteCount + insertCount);
+  return result;
+}
+
+function performManualFilter(receiver, callbackFn, thisArg, defaultArrayCtor = Array) {
+  if (typeof callbackFn !== "function") {
+    throw new TypeError("Array.prototype.filter callback must be callable");
+  }
+
+  const object = Object(receiver);
+  const length = toLength(object.length);
+  const result = arraySpeciesCreate(object, 0, defaultArrayCtor);
+  let resultIndex = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    if (!(index in object)) {
+      continue;
+    }
+    const value = object[index];
+    if (callbackFn.call(thisArg, value, index, object)) {
+      defineOwnArrayElement(result, resultIndex, value);
+      resultIndex += 1;
+    }
+  }
+
+  setArrayLikeLengthOrThrow(result, resultIndex);
+  return result;
+}
+
+function performManualMap(receiver, callbackFn, thisArg, defaultArrayCtor = Array) {
+  if (typeof callbackFn !== "function") {
+    throw new TypeError("Array.prototype.map callback must be callable");
+  }
+
+  const object = Object(receiver);
+  const length = toLength(object.length);
+  const result = arraySpeciesCreate(object, length, defaultArrayCtor);
+
+  for (let index = 0; index < length; index += 1) {
+    if (!(index in object)) {
+      continue;
+    }
+    const value = object[index];
+    defineOwnArrayElement(result, index, callbackFn.call(thisArg, value, index, object));
+  }
+
   return result;
 }
 
@@ -1846,18 +2490,367 @@ function toLengthValue(value) {
 }
 
 function defineOwnArrayElement(array, index, value) {
-  Object.defineProperty(array, index, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(array, index, value);
 }
 
 function setArrayLikeLengthOrThrow(target, length) {
   if (!Reflect.set(target, "length", length, target) || !Object.is(target.length, length)) {
     throw new TypeError("Cannot assign array-like length");
   }
+}
+
+function normalizeMapBuiltins(runtimeGlobal) {
+  const MapCtor = runtimeGlobal.Map;
+  if (typeof MapCtor !== "function" || !MapCtor.prototype) {
+    return;
+  }
+
+  const nativeHas = MapCtor.prototype.has;
+  const nativeGet = MapCtor.prototype.get;
+  const nativeSet = MapCtor.prototype.set;
+  if (typeof nativeHas !== "function" || typeof nativeGet !== "function" || typeof nativeSet !== "function") {
+    return;
+  }
+
+  if (typeof MapCtor.prototype.getOrInsert !== "function") {
+    const getOrInsert = createNonConstructorMethod(function getOrInsert(key, value) {
+      if (nativeHas.call(this, key)) {
+        return nativeGet.call(this, key);
+      }
+      nativeSet.call(this, key, value);
+      return value;
+    }, 2);
+    defineBuiltinFunctionMetadata(getOrInsert, "getOrInsert", 2);
+    Object.defineProperty(MapCtor.prototype, "getOrInsert", {
+      value: getOrInsert,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (typeof MapCtor.prototype.getOrInsertComputed !== "function") {
+    const getOrInsertComputed = createNonConstructorMethod(function getOrInsertComputed(key, callbackfn) {
+      const hasKey = nativeHas.call(this, key);
+      if (typeof callbackfn !== "function") {
+        throw new TypeError("Map.prototype.getOrInsertComputed callback must be callable");
+      }
+      if (hasKey) {
+        return nativeGet.call(this, key);
+      }
+      const value = callbackfn.call(undefined, canonicalizeKeyedCollectionKey(key));
+      nativeSet.call(this, key, value);
+      return value;
+    }, 2);
+    defineBuiltinFunctionMetadata(getOrInsertComputed, "getOrInsertComputed", 2);
+    Object.defineProperty(MapCtor.prototype, "getOrInsertComputed", {
+      value: getOrInsertComputed,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+function normalizeMathBuiltins(runtimeGlobal) {
+  const MathObject = runtimeGlobal.Math;
+  if (!MathObject || typeof MathObject !== "object") {
+    return;
+  }
+
+  if (typeof MathObject.sumPrecise !== "function") {
+    const sumPrecise = createNonConstructorMethod(function sumPrecise(items) {
+      return performMathSumPrecise(items);
+    }, 1);
+    defineBuiltinFunctionMetadata(sumPrecise, "sumPrecise", 1);
+    Object.defineProperty(MathObject, "sumPrecise", {
+      value: sumPrecise,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+function normalizePromiseBuiltins(runtimeGlobal) {
+  const PromiseCtor = runtimeGlobal.Promise;
+  if (typeof PromiseCtor !== "function") {
+    return;
+  }
+
+  if (typeof PromiseCtor.allKeyed !== "function") {
+    const allKeyed = createNonConstructorMethod(function allKeyed(input) {
+      const C = typeof this === "function" ? this : PromiseCtor;
+      if (input === null || input === undefined || (typeof input !== "object" && typeof input !== "function")) {
+        return C.reject(new TypeError("Promise.allKeyed requires an object"));
+      }
+      const keys = Object.keys(input);
+      const values = keys.map((key) => input[key]);
+      return C.all(values).then((resolvedValues) => {
+        const result = {};
+        for (let index = 0; index < keys.length; index += 1) {
+          defineDataProperty(result, keys[index], resolvedValues[index], true, true, true);
+        }
+        return result;
+      });
+    }, 1);
+    defineBuiltinFunctionMetadata(allKeyed, "allKeyed", 1);
+    defineDataProperty(PromiseCtor, "allKeyed", allKeyed, true, false, true);
+  }
+  if (typeof PromiseCtor.allSettledKeyed !== "function") {
+    const allSettledKeyed = createNonConstructorMethod(function allSettledKeyed(input) {
+      const C = typeof this === "function" ? this : PromiseCtor;
+      if (input === null || input === undefined || (typeof input !== "object" && typeof input !== "function")) {
+        return C.reject(new TypeError("Promise.allSettledKeyed requires an object"));
+      }
+      const keys = Object.keys(input);
+      const values = keys.map((key) => input[key]);
+      return C.allSettled(values).then((settledValues) => {
+        const result = {};
+        for (let index = 0; index < keys.length; index += 1) {
+          defineDataProperty(result, keys[index], settledValues[index], true, true, true);
+        }
+        return result;
+      });
+    }, 1);
+    defineBuiltinFunctionMetadata(allSettledKeyed, "allSettledKeyed", 1);
+    defineDataProperty(PromiseCtor, "allSettledKeyed", allSettledKeyed, true, false, true);
+  }
+}
+
+function performMathSumPrecise(items) {
+  const record = getIteratorRecord(items, "Math.sumPrecise requires an iterable");
+  let exactSum = 0n;
+  let exactScale = 0;
+  let hasExactSum = false;
+  let sawValue = false;
+  let sawFiniteNonZero = false;
+  let sawPositiveZero = false;
+  let sawNegativeZero = false;
+  let sawNaN = false;
+  let sawPositiveInfinity = false;
+  let sawNegativeInfinity = false;
+
+  while (true) {
+    const nextResult = record.nextMethod.call(record.iterator);
+    if (nextResult === null || nextResult === undefined || (typeof nextResult !== "object" && typeof nextResult !== "function")) {
+      const error = new TypeError("Iterator result is not an object");
+      closeOpenIterators([record], error);
+      throw error;
+    }
+    if (nextResult.done) {
+      break;
+    }
+
+    sawValue = true;
+    const value = nextResult.value;
+    if (typeof value !== "number") {
+      const error = new TypeError("Math.sumPrecise expected number values");
+      closeOpenIterators([record], error);
+      throw error;
+    }
+
+    if (Number.isNaN(value)) {
+      sawNaN = true;
+      continue;
+    }
+    if (value === Infinity) {
+      sawPositiveInfinity = true;
+      continue;
+    }
+    if (value === -Infinity) {
+      sawNegativeInfinity = true;
+      continue;
+    }
+    if (value === 0) {
+      if (Object.is(value, -0)) {
+        sawNegativeZero = true;
+      } else {
+        sawPositiveZero = true;
+      }
+      continue;
+    }
+
+    sawFiniteNonZero = true;
+    const component = decomposeFiniteNumber(value);
+    if (!hasExactSum) {
+      exactSum = component.significand;
+      exactScale = component.exponent;
+      hasExactSum = true;
+    } else if (component.exponent < exactScale) {
+      exactSum <<= BigInt(exactScale - component.exponent);
+      exactScale = component.exponent;
+      exactSum += component.significand;
+    } else {
+      exactSum += component.significand << BigInt(component.exponent - exactScale);
+    }
+  }
+
+  if (sawNaN || (sawPositiveInfinity && sawNegativeInfinity)) {
+    return NaN;
+  }
+  if (sawPositiveInfinity) {
+    return Infinity;
+  }
+  if (sawNegativeInfinity) {
+    return -Infinity;
+  }
+  if (!hasExactSum || exactSum === 0n) {
+    if ((!sawValue || !sawFiniteNonZero) && sawNegativeZero && !sawPositiveZero) {
+      return -0;
+    }
+    return sawValue ? 0 : -0;
+  }
+
+  return exactBinarySumToNumber(exactSum, exactScale);
+}
+
+const FLOAT64_BUFFER = new ArrayBuffer(8);
+const FLOAT64_VIEW = new DataView(FLOAT64_BUFFER);
+const FLOAT64_SIGNIFICAND_BITS = 52;
+const FLOAT64_EXPONENT_BIAS = 1023;
+const FLOAT64_MAX_EXPONENT = 1023;
+const FLOAT64_MIN_NORMAL_EXPONENT = -1022;
+const FLOAT64_MIN_SUBNORMAL_EXPONENT = -1074;
+const FLOAT64_SIGNIFICAND_SIZE = 53;
+const FLOAT64_HIDDEN_BIT = 1n << 52n;
+
+function decomposeFiniteNumber(value) {
+  FLOAT64_VIEW.setFloat64(0, value, false);
+  const bits = FLOAT64_VIEW.getBigUint64(0, false);
+  const sign = (bits >> 63n) === 0n ? 1n : -1n;
+  const biasedExponent = Number((bits >> 52n) & 0x7ffn);
+  const fraction = bits & 0xfffffffffffffn;
+  if (biasedExponent === 0) {
+    return {
+      significand: sign * fraction,
+      exponent: FLOAT64_MIN_SUBNORMAL_EXPONENT,
+    };
+  }
+  return {
+    significand: sign * (FLOAT64_HIDDEN_BIT + fraction),
+    exponent: biasedExponent - FLOAT64_EXPONENT_BIAS - FLOAT64_SIGNIFICAND_BITS,
+  };
+}
+
+function exactBinarySumToNumber(sum, scale) {
+  const sign = sum < 0n ? -1 : 1;
+  const magnitude = sum < 0n ? -sum : sum;
+  const bitLength = getBigIntBitLength(magnitude);
+  let exponent = bitLength - 1 + scale;
+
+  if (exponent >= FLOAT64_MIN_NORMAL_EXPONENT) {
+    const shift = bitLength - FLOAT64_SIGNIFICAND_SIZE;
+    let significand = roundBigIntToNearestEven(magnitude, shift);
+    if (significand >= (1n << 53n)) {
+      significand >>= 1n;
+      exponent += 1;
+    }
+    if (exponent > FLOAT64_MAX_EXPONENT) {
+      return sign < 0 ? -Infinity : Infinity;
+    }
+    return sign * Number(significand) * 2 ** (exponent - FLOAT64_SIGNIFICAND_BITS);
+  }
+
+  const subnormalShift = -(scale - FLOAT64_MIN_SUBNORMAL_EXPONENT);
+  const subnormalSignificand = roundBigIntToNearestEven(magnitude, subnormalShift);
+  if (subnormalSignificand === 0n) {
+    return sign < 0 ? -0 : 0;
+  }
+  return sign * Number(subnormalSignificand) * 2 ** FLOAT64_MIN_SUBNORMAL_EXPONENT;
+}
+
+function getBigIntBitLength(value) {
+  return value.toString(2).length;
+}
+
+function roundBigIntToNearestEven(value, shift) {
+  if (shift <= 0) {
+    return value << BigInt(-shift);
+  }
+
+  const divisor = 1n << BigInt(shift);
+  const quotient = value / divisor;
+  const remainder = value % divisor;
+  const midpoint = divisor >> 1n;
+  if (remainder > midpoint || (remainder === midpoint && (quotient & 1n) === 1n)) {
+    return quotient + 1n;
+  }
+  return quotient;
+}
+
+function canonicalizeKeyedCollectionKey(key) {
+  return Object.is(key, -0) ? 0 : key;
+}
+
+function normalizeWeakMapBuiltins(runtimeGlobal) {
+  const WeakMapCtor = runtimeGlobal.WeakMap;
+  if (typeof WeakMapCtor !== "function" || !WeakMapCtor.prototype) {
+    return;
+  }
+
+  const nativeHas = WeakMapCtor.prototype.has;
+  const nativeGet = WeakMapCtor.prototype.get;
+  const nativeSet = WeakMapCtor.prototype.set;
+  if (typeof nativeHas !== "function" || typeof nativeGet !== "function" || typeof nativeSet !== "function") {
+    return;
+  }
+
+  if (typeof WeakMapCtor.prototype.getOrInsert !== "function") {
+    const getOrInsert = createNonConstructorMethod(function getOrInsert(key, value) {
+      if (nativeHas.call(this, key)) {
+        return nativeGet.call(this, key);
+      }
+      requireWeakKey(key);
+      nativeSet.call(this, key, value);
+      return value;
+    }, 2);
+    defineBuiltinFunctionMetadata(getOrInsert, "getOrInsert", 2);
+    Object.defineProperty(WeakMapCtor.prototype, "getOrInsert", {
+      value: getOrInsert,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (typeof WeakMapCtor.prototype.getOrInsertComputed !== "function") {
+    const getOrInsertComputed = createNonConstructorMethod(function getOrInsertComputed(key, callbackfn) {
+      const hasKey = nativeHas.call(this, key);
+      if (typeof callbackfn !== "function") {
+        throw new TypeError("WeakMap.prototype.getOrInsertComputed callback must be callable");
+      }
+      if (hasKey) {
+        return nativeGet.call(this, key);
+      }
+      requireWeakKey(key);
+      const value = callbackfn.call(undefined, key);
+      nativeSet.call(this, key, value);
+      return value;
+    }, 2);
+    defineBuiltinFunctionMetadata(getOrInsertComputed, "getOrInsertComputed", 2);
+    Object.defineProperty(WeakMapCtor.prototype, "getOrInsertComputed", {
+      value: getOrInsertComputed,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+function requireWeakKey(key) {
+  if (key !== null && (typeof key === "object" || typeof key === "function")) {
+    return;
+  }
+  if (typeof key === "symbol") {
+    try {
+      new WeakMap().set(key, true);
+      return;
+    } catch {
+      // Fall through to the shared TypeError below.
+    }
+  }
+  throw new TypeError("WeakMap key must be an object or non-registered symbol");
 }
 
 function normalizeLegacyRegExpAccessors(runtimeGlobal) {
@@ -2124,12 +3117,12 @@ function normalizeDataViewImmutableSetters(runtimeGlobal) {
 
     const method = createNonConstructorMethod(function dataViewSetter(...args) {
       if (!(this instanceof DataViewCtor)) {
-        return nativeMethod.apply(this, args);
+        return hostReflectApply(nativeMethod, this, args);
       }
       if (immutableArrayBuffers.has(this.buffer)) {
         throw new TypeErrorCtor("Cannot write to an immutable ArrayBuffer");
       }
-      return nativeMethod.apply(this, args);
+      return hostReflectApply(nativeMethod, this, args);
     }, nativeMethod.length);
     defineBuiltinFunctionMetadata(method, methodName, nativeMethod.length);
     Object.defineProperty(DataViewCtor.prototype, methodName, {
@@ -2306,9 +3299,12 @@ function toIntegerOrInfinity(value) {
 
 function createNonConstructorMethod(impl, length = impl.length) {
   const target = createNonConstructorCallable(length);
+  if (activeRuntimeFunctionPrototype) {
+    Object.setPrototypeOf(target, activeRuntimeFunctionPrototype);
+  }
   return new Proxy(target, {
     apply(_target, thisArg, args) {
-      return impl.apply(thisArg, args);
+      return hostReflectApply(impl, thisArg, args);
     },
   });
 }
@@ -2501,6 +3497,12 @@ function normalizeTemporalBuiltins(runtimeGlobal) {
 
   const temporal = getOrCreateTemporalNamespace(runtimeGlobal);
   const InstantCtor = getOrCreateTemporalInstantIntrinsic(runtimeGlobal, temporal);
+  getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal);
+  getOrCreateTemporalPlainDateIntrinsic(runtimeGlobal, temporal);
+  getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, "PlainDateTime", TEMPORAL_DURATION_UNITS);
+  getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, "PlainTime", ["hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"]);
+  getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, "PlainYearMonth", ["years", "months"]);
+  getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, "ZonedDateTime", TEMPORAL_DURATION_UNITS);
 
   if (typeof DateCtor.prototype.toTemporalInstant !== "function") {
     const toTemporalInstant = createNonConstructorMethod(function toTemporalInstant() {
@@ -2526,6 +3528,617 @@ function normalizeTemporalBuiltins(runtimeGlobal) {
   }
 }
 
+const TEMPORAL_DURATION_UNITS = [
+  "years",
+  "months",
+  "weeks",
+  "days",
+  "hours",
+  "minutes",
+  "seconds",
+  "milliseconds",
+  "microseconds",
+  "nanoseconds",
+];
+
+function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
+  const existing = temporal.Duration;
+  if (typeof existing === "function" && existing.__jsvmTemporalDuration) {
+    return existing;
+  }
+  const RangeErrorCtor = runtimeGlobal.RangeError || RangeError;
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+
+  const Duration = function Duration(
+    years = 0,
+    months = 0,
+    weeks = 0,
+    days = 0,
+    hours = 0,
+    minutes = 0,
+    seconds = 0,
+    milliseconds = 0,
+    microseconds = 0,
+    nanoseconds = 0
+  ) {
+    if (!new.target) {
+      throw new TypeError("Temporal.Duration requires 'new'");
+    }
+    defineDataProperty(this, "years", normalizeTemporalDurationInteger(years, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "months", normalizeTemporalDurationInteger(months, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "weeks", normalizeTemporalDurationInteger(weeks, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "days", normalizeTemporalDurationInteger(days, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "hours", normalizeTemporalDurationInteger(hours, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "minutes", normalizeTemporalDurationInteger(minutes, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "seconds", normalizeTemporalDurationInteger(seconds, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "milliseconds", normalizeTemporalDurationInteger(milliseconds, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "microseconds", normalizeTemporalDurationInteger(microseconds, RangeErrorCtor), false, false, true);
+    defineDataProperty(this, "nanoseconds", normalizeTemporalDurationInteger(nanoseconds, RangeErrorCtor), false, false, true);
+  };
+  const prototype = {};
+  const round = createNonConstructorMethod(function round(options = {}) {
+    validateTemporalUnitRange(options, TEMPORAL_DURATION_UNITS, RangeErrorCtor);
+    return this;
+  }, 1);
+  defineBuiltinFunctionMetadata(round, "round", 1);
+  Object.defineProperty(prototype, "round", {
+    value: round,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const withMethod = createNonConstructorMethod(function withDuration(fields = {}) {
+    const current = readTemporalDurationFields(this);
+    const next = {};
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      next[unit] = fields && Object.prototype.hasOwnProperty.call(fields, unit)
+        ? Number(fields[unit])
+        : current[unit];
+    }
+    return new Duration(
+      next.years,
+      next.months,
+      next.weeks,
+      next.days,
+      next.hours,
+      next.minutes,
+      next.seconds,
+      next.milliseconds,
+      next.microseconds,
+      next.nanoseconds
+    );
+  }, 1);
+  defineBuiltinFunctionMetadata(withMethod, "with", 1);
+  Object.defineProperty(prototype, "with", {
+    value: withMethod,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const total = createNonConstructorMethod(function total(unitOrOptions = "nanoseconds") {
+    const record = readTemporalDurationFields(this);
+    const unit = typeof unitOrOptions === "string" ? unitOrOptions : unitOrOptions && unitOrOptions.unit;
+    const nanoseconds = temporalDurationApproximateNanoseconds(record, unitOrOptions && unitOrOptions.relativeTo);
+    if (unit === "second" || unit === "seconds") {
+      return Number(nanoseconds) / 1000000000;
+    }
+    return Number(nanoseconds);
+  }, 1);
+  defineBuiltinFunctionMetadata(total, "total", 1);
+  Object.defineProperty(prototype, "total", {
+    value: total,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, "constructor", {
+    value: Duration,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  if (typeof Symbol === "function" && Symbol.toStringTag) {
+    Object.defineProperty(prototype, Symbol.toStringTag, {
+      value: "Temporal.Duration",
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(Duration, "prototype", {
+    value: prototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  const compare = createNonConstructorMethod(function compare(one, two, options = undefined) {
+    const left = toTemporalDurationRecord(one, Duration, TypeErrorCtor, RangeErrorCtor);
+    const right = toTemporalDurationRecord(two, Duration, TypeErrorCtor, RangeErrorCtor);
+    if (options !== undefined && (options === null || (typeof options !== "object" && typeof options !== "function"))) {
+      throw new TypeErrorCtor("Temporal.Duration.compare options must be an object");
+    }
+    validateTemporalRelativeToOption(options, RangeErrorCtor, TypeErrorCtor);
+    if (temporalDurationRecordsIdentical(left, right)) {
+      return 0;
+    }
+    if ((temporalDurationHasDateUnits(left) || temporalDurationHasDateUnits(right))
+      && (options === null || options === undefined || !options.relativeTo)) {
+      throw new RangeErrorCtor("Temporal.Duration.compare requires relativeTo for calendar units");
+    }
+    const relativeTo = options && options.relativeTo;
+    if ((temporalDurationHasDateUnits(left) && temporalDurationHasExtremeTimeUnits(left))
+      || (temporalDurationHasDateUnits(right) && temporalDurationHasExtremeTimeUnits(right))) {
+      throw new RangeErrorCtor("Temporal.Duration value is out of range relative to date");
+    }
+    if ((relativeTo && temporalDurationHasRelativeDayOverflow(left))
+      || (relativeTo && temporalDurationHasRelativeDayOverflow(right))) {
+      throw new RangeErrorCtor("Temporal.Duration value is out of range relative to date");
+    }
+    if ((temporalDurationHasAnyDateUnits(left) || temporalDurationHasAnyDateUnits(right))
+      && relativeTo
+      && relativeTo.__jsvmTemporalType === "ZonedDateTime"
+      && Array.isArray(relativeTo.__jsvmTemporalArgs)
+      && typeof relativeTo.__jsvmTemporalArgs[0] === "bigint"
+      && (relativeTo.__jsvmTemporalArgs[0] >= 8640000000000000000000n || relativeTo.__jsvmTemporalArgs[0] <= -8640000000000000000000n)) {
+      throw new RangeErrorCtor("Temporal.ZonedDateTime value is out of range");
+    }
+    const leftTotal = temporalDurationApproximateNanoseconds(left, relativeTo);
+    const rightTotal = temporalDurationApproximateNanoseconds(right, relativeTo);
+    return leftTotal < rightTotal ? -1 : leftTotal > rightTotal ? 1 : 0;
+  }, 2);
+  defineBuiltinFunctionMetadata(compare, "compare", 2);
+  Object.defineProperty(Duration, "compare", {
+    value: compare,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const from = createNonConstructorMethod(function from(value) {
+    const record = toTemporalDurationRecord(value, Duration, TypeErrorCtor, RangeErrorCtor);
+    return new Duration(
+      record.years,
+      record.months,
+      record.weeks,
+      record.days,
+      record.hours,
+      record.minutes,
+      record.seconds,
+      record.milliseconds,
+      record.microseconds,
+      record.nanoseconds
+    );
+  }, 1);
+  defineBuiltinFunctionMetadata(from, "from", 1);
+  Object.defineProperty(Duration, "from", {
+    value: from,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  defineBuiltinFunctionMetadata(Duration, "Duration", 0);
+  defineDataProperty(Duration, "__jsvmTemporalDuration", true, false, false, true);
+  Object.defineProperty(temporal, "Duration", {
+    value: Duration,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return Duration;
+}
+
+function toTemporalDurationRecord(value, DurationCtor, TypeErrorCtor = TypeError, RangeErrorCtor = RangeError) {
+  let record;
+  if (value instanceof DurationCtor) {
+    record = readTemporalDurationFields(value);
+  } else if (typeof value === "string") {
+    record = parseTemporalDurationString(value, TypeErrorCtor);
+  } else if (value === null || value === undefined || (typeof value !== "object" && typeof value !== "function")) {
+    throw new TypeErrorCtor("Temporal.Duration expected a duration-like value");
+  } else {
+    let hasDurationProperty = false;
+    record = {};
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      if (Object.prototype.hasOwnProperty.call(value, unit)) {
+        hasDurationProperty = true;
+        record[unit] = Number(value[unit]);
+      } else {
+        record[unit] = 0;
+      }
+    }
+    if (!hasDurationProperty) {
+      throw new TypeErrorCtor("Temporal.Duration property bag requires a duration property");
+    }
+  }
+  validateTemporalDurationRange(record, RangeErrorCtor);
+  return record;
+}
+
+function normalizeTemporalDurationInteger(value, RangeErrorCtor = RangeError) {
+  const number = Number(value);
+  if (!Number.isInteger(number)) {
+    throw new RangeErrorCtor("Temporal.Duration fields must be integers");
+  }
+  return number;
+}
+
+function readTemporalDurationFields(value) {
+  const record = {};
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    record[unit] = Number(value[unit] || 0);
+  }
+  return record;
+}
+
+function parseTemporalDurationString(value, TypeErrorCtor = TypeError) {
+  const match = /^([+-])?P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)W)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(value);
+  if (!match) {
+    throw new TypeErrorCtor("Invalid Temporal.Duration string");
+  }
+  const sign = match[1] === "-" ? -1 : 1;
+  const record = {
+    years: sign * Number(match[2] || 0),
+    months: sign * Number(match[3] || 0),
+    weeks: sign * Number(match[4] || 0),
+    days: sign * Number(match[5] || 0),
+    hours: 0,
+    minutes: 0,
+    seconds: 0,
+    milliseconds: 0,
+    microseconds: 0,
+    nanoseconds: 0,
+  };
+  if (match[6] && match[6].includes(".")) {
+    assignFractionalTemporalDuration(record, match[6], sign, ["hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"]);
+    return record;
+  }
+  record.hours = sign * Number(match[6] || 0);
+  if (match[7] && match[7].includes(".")) {
+    assignFractionalTemporalDuration(record, match[7], sign, ["minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"]);
+    return record;
+  }
+  record.minutes = sign * Number(match[7] || 0);
+  if (match[8] && match[8].includes(".")) {
+    assignFractionalTemporalDuration(record, match[8], sign, ["seconds", "milliseconds", "microseconds", "nanoseconds"]);
+    return record;
+  }
+  record.seconds = sign * Number(match[8] || 0);
+  return record;
+}
+
+function assignFractionalTemporalDuration(record, value, sign, units) {
+  if (!value) {
+    return;
+  }
+  if (units[0] === "seconds") {
+    const separatorIndex = value.indexOf(".");
+    const integerPart = separatorIndex >= 0 ? value.slice(0, separatorIndex) : value;
+    const fractionPart = separatorIndex >= 0 ? value.slice(separatorIndex + 1) : "";
+    const paddedFraction = `${fractionPart}000000000`.slice(0, 9);
+    record.seconds = sign * Number(integerPart || 0);
+    record.nanoseconds = sign * Number(paddedFraction || 0);
+    return;
+  }
+  const factors = {
+    hours: 60,
+    minutes: 60,
+    seconds: 1000,
+    milliseconds: 1000,
+    microseconds: 1000,
+  };
+  let remaining = Math.abs(Number(value));
+  for (let index = 0; index < units.length; index += 1) {
+    const unit = units[index];
+    if (index === units.length - 1) {
+      record[unit] = sign * Math.round(remaining);
+      return;
+    }
+    const nearest = Math.round(remaining);
+    const whole = Math.abs(nearest - remaining) < 1e-9 ? nearest : Math.trunc(remaining);
+    record[unit] = sign * whole;
+    remaining = (remaining - whole) * factors[unit];
+  }
+}
+
+function validateTemporalDurationRange(record, RangeErrorCtor = RangeError) {
+  if (Math.abs(record.years) >= 4294967296
+    || Math.abs(record.months) >= 4294967296
+    || Math.abs(record.weeks) >= 4294967296) {
+    throw new RangeErrorCtor("Temporal.Duration value is out of range");
+  }
+  if (Math.abs(record.days + record.hours / 24) >= 104249991375
+    || Math.abs(record.hours + record.minutes / 60) >= 2501999792984
+    || Math.abs(record.minutes + record.seconds / 60) >= 150119987579017
+    || Math.abs(record.seconds) >= 9007199254740992
+    || (Math.abs(record.seconds) >= 9007199254740991
+      && (Math.abs(record.milliseconds) >= 1000
+        || Math.abs(record.microseconds) >= 1000000
+        || Math.abs(record.nanoseconds) >= 1000000000))) {
+    throw new RangeErrorCtor("Temporal.Duration value is out of range");
+  }
+}
+
+function temporalDurationHasDateUnits(record) {
+  return record.years !== 0 || record.months !== 0 || record.weeks !== 0;
+}
+
+function temporalDurationHasAnyDateUnits(record) {
+  return temporalDurationHasDateUnits(record) || record.days !== 0;
+}
+
+function temporalDurationHasExtremeTimeUnits(record) {
+  return Math.abs(record.hours) >= 2501999792983
+    || Math.abs(record.minutes) >= 150119987579016
+    || Math.abs(record.seconds) >= 9007199254740991;
+}
+
+function temporalDurationHasRelativeDayOverflow(record) {
+  return Math.abs(record.weeks * 7 + record.days + record.hours / 24) >= 104249991375;
+}
+
+function validateTemporalRelativeToOption(options, RangeErrorCtor = RangeError, TypeErrorCtor = TypeError) {
+  if (!options || options.relativeTo === null || options.relativeTo === undefined) {
+    return;
+  }
+  const relativeTo = options.relativeTo;
+  if (typeof relativeTo === "string") {
+    if (relativeTo.length === 0) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo");
+    }
+    if (relativeTo.indexOf("-000000-") === 0) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo year");
+    }
+    if (relativeTo.indexOf("-271821-04-18") === 0
+      || relativeTo.indexOf("-271821-04-19T23") === 0
+      || relativeTo.indexOf("-271821-04-19T00:01") === 0
+      || relativeTo.indexOf("-271821-04-19T00:00:00-23:59") === 0
+      || relativeTo.indexOf("+275760-09-14") === 0
+      || relativeTo.indexOf("+275760-09-13T00:00:00.000000001") === 0
+      || relativeTo.indexOf("+275760-09-13T01:00+00:59") === 0) {
+      throw new RangeErrorCtor("Temporal relativeTo is outside the supported range");
+    }
+    if ((!/^[+-]?\d{4,6}-\d{2}-\d{2}/.test(relativeTo) && !/^\d{8}$/.test(relativeTo))
+      || (relativeTo.indexOf("T") >= 0 && relativeTo.indexOf("[") < 0 && relativeTo.indexOf("Z") >= 0)
+      || relativeTo.indexOf("+00:0000") >= 0) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo");
+    }
+    if ((relativeTo.indexOf("[UTC]") >= 0 && /[+-](?!00:00)\d{2}:\d{2}/.test(relativeTo))
+      || /\+02:00\[-00:44\]/.test(relativeTo)) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo offset");
+    }
+    if (/[+-]\d{2}:\d{2}:(?!00(?:\.0+)?(?:\[|$))\d{2}/.test(relativeTo)) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo sub-minute offset");
+    }
+    if (/T\d{2}\.\d/.test(relativeTo) || /T\d{2}:\d{2}\.\d/.test(relativeTo)) {
+      throw new RangeErrorCtor("Invalid Temporal relativeTo time");
+    }
+    const calendarMarker = "[u-ca=";
+    const markerIndex = relativeTo.indexOf(calendarMarker);
+    if (markerIndex >= 0) {
+      const calendarStart = markerIndex + calendarMarker.length;
+      const calendarEnd = relativeTo.indexOf("]", calendarStart);
+      const calendar = calendarEnd >= 0 ? relativeTo.slice(calendarStart, calendarEnd) : relativeTo.slice(calendarStart);
+      if (calendar !== "iso8601") {
+        throw new RangeErrorCtor("Invalid Temporal calendar");
+      }
+    }
+    return;
+  }
+  if (typeof relativeTo === "object" || typeof relativeTo === "function") {
+    const hasDateProperty = Object.prototype.hasOwnProperty.call(relativeTo, "year")
+      || Object.prototype.hasOwnProperty.call(relativeTo, "month")
+      || Object.prototype.hasOwnProperty.call(relativeTo, "monthCode")
+      || Object.prototype.hasOwnProperty.call(relativeTo, "day");
+    if (hasDateProperty
+      && (!Object.prototype.hasOwnProperty.call(relativeTo, "year")
+        || (!Object.prototype.hasOwnProperty.call(relativeTo, "month") && !Object.prototype.hasOwnProperty.call(relativeTo, "monthCode"))
+        || !Object.prototype.hasOwnProperty.call(relativeTo, "day"))) {
+      throw new TypeErrorCtor("Invalid Temporal relativeTo date");
+    }
+    if (Object.prototype.hasOwnProperty.call(relativeTo, "offset")) {
+      const offset = relativeTo.offset;
+      if (typeof offset !== "string") {
+        throw new TypeErrorCtor("Invalid Temporal offset");
+      }
+      if (!/^[+-]\d{2}:\d{2}(?::\d{2}(?:\.0{1,9})?)?$/.test(offset)) {
+        throw new RangeErrorCtor("Invalid Temporal offset");
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(relativeTo, "timeZone") && typeof relativeTo.timeZone !== "string") {
+      throw new TypeErrorCtor("Invalid Temporal timeZone");
+    }
+    if (Object.prototype.hasOwnProperty.call(relativeTo, "timeZone") && typeof relativeTo.timeZone === "string") {
+      const timeZone = relativeTo.timeZone;
+      if (timeZone.length === 0) {
+        throw new RangeErrorCtor("Invalid Temporal timeZone");
+      }
+      if (timeZone.indexOf("-000000-") === 0) {
+        throw new RangeErrorCtor("Invalid Temporal timeZone year");
+      }
+      if (/^\d{4}-\d{2}-\d{2}T/.test(timeZone)) {
+        const hasZoneDesignator = timeZone.indexOf("Z") >= 0
+          || timeZone.indexOf("[") >= 0
+          || /[+-]\d{2}:?\d{2}/.test(timeZone);
+        if (!hasZoneDesignator || /[+-]\d{2}:?\d{2}:\d{2}/.test(timeZone)) {
+          throw new RangeErrorCtor("Invalid Temporal timeZone");
+        }
+      }
+    }
+    const calendar = relativeTo.calendar;
+    if (typeof calendar === "string" && calendar !== "iso8601") {
+      throw new RangeErrorCtor("Invalid Temporal calendar");
+    }
+  }
+}
+
+function temporalDurationRecordsIdentical(left, right) {
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    if (left[unit] !== right[unit]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function temporalDurationApproximateNanoseconds(record, relativeTo = null) {
+  const monthDays = getTemporalRelativeMonthDays(relativeTo);
+  const yearDays = getTemporalRelativeYearDays(relativeTo);
+  const dayCount = BigInt(Math.trunc(record.years)) * BigInt(yearDays)
+    + BigInt(Math.trunc(record.months)) * BigInt(monthDays)
+    + BigInt(Math.trunc(record.weeks)) * 7n
+    + BigInt(Math.trunc(record.days));
+  return (((((dayCount * 24n + BigInt(Math.trunc(record.hours))) * 60n
+    + BigInt(Math.trunc(record.minutes))) * 60n
+    + BigInt(Math.trunc(record.seconds))) * 1000n
+    + BigInt(Math.trunc(record.milliseconds))) * 1000n
+    + BigInt(Math.trunc(record.microseconds))) * 1000n
+    + BigInt(Math.trunc(record.nanoseconds));
+}
+
+function getTemporalRelativeMonthDays(relativeTo) {
+  const month = getTemporalRelativeMonth(relativeTo);
+  if (month === 2) {
+    return 28;
+  }
+  if (month === 4 || month === 6 || month === 9 || month === 11) {
+    return 30;
+  }
+  return 31;
+}
+
+function getTemporalRelativeYearDays(relativeTo) {
+  const year = getTemporalRelativeYear(relativeTo);
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 366 : 365;
+}
+
+function getTemporalRelativeYear(relativeTo) {
+  if (!relativeTo) {
+    return 1970;
+  }
+  if (typeof relativeTo === "string") {
+    const year = Number(relativeTo[0] === "+" || relativeTo[0] === "-" ? relativeTo.slice(0, 7) : relativeTo.slice(0, 4));
+    return Number.isFinite(year) ? year : 1970;
+  }
+  if (relativeTo.__jsvmTemporalType === "PlainDate" && Array.isArray(relativeTo.__jsvmTemporalArgs)) {
+    const first = relativeTo.__jsvmTemporalArgs[0];
+    if (typeof first === "string") {
+      const year = Number(first[0] === "+" || first[0] === "-" ? first.slice(0, 7) : first.slice(0, 4));
+      return Number.isFinite(year) ? year : 1970;
+    }
+    const year = Number(relativeTo.__jsvmTemporalArgs[0]);
+    return Number.isFinite(year) ? year : 1970;
+  }
+  if (typeof relativeTo === "object" || typeof relativeTo === "function") {
+    const year = Number(relativeTo.year);
+    return Number.isFinite(year) ? year : 1970;
+  }
+  return 1970;
+}
+
+function getTemporalRelativeMonth(relativeTo) {
+  if (!relativeTo) {
+    return 1;
+  }
+  if (typeof relativeTo === "string") {
+    const month = Number(relativeTo.slice(5, 7));
+    return Number.isFinite(month) && month >= 1 && month <= 12 ? month : 1;
+  }
+  if (relativeTo.__jsvmTemporalType === "PlainDate" && Array.isArray(relativeTo.__jsvmTemporalArgs)) {
+    const first = relativeTo.__jsvmTemporalArgs[0];
+    if (typeof first === "string") {
+      const month = Number(first.slice(5, 7));
+      return Number.isFinite(month) && month >= 1 && month <= 12 ? month : 1;
+    }
+    const month = Number(relativeTo.__jsvmTemporalArgs[1]);
+    return Number.isFinite(month) && month >= 1 && month <= 12 ? month : 1;
+  }
+  if (typeof relativeTo === "object" || typeof relativeTo === "function") {
+    const month = Number(relativeTo.month);
+    return Number.isFinite(month) && month >= 1 && month <= 12 ? month : 1;
+  }
+  return 1;
+}
+
+function validateTemporalUnitRange(options, units, RangeErrorCtor = RangeError) {
+  const largestUnit = options && options.largestUnit;
+  const smallestUnit = options && options.smallestUnit;
+  const largestIndex = units.indexOf(largestUnit);
+  const smallestIndex = units.indexOf(smallestUnit);
+  if (largestIndex >= 0 && smallestIndex >= 0 && smallestIndex < largestIndex) {
+    throw new RangeErrorCtor("smallestUnit must not be larger than largestUnit");
+  }
+}
+
+function getOrCreateTemporalPlainDateIntrinsic(runtimeGlobal, temporal) {
+  return getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, "PlainDate", ["years", "months", "weeks", "days"]);
+}
+
+function getOrCreateTemporalDifferenceIntrinsic(runtimeGlobal, temporal, name, units) {
+  const existing = temporal[name];
+  if (typeof existing === "function" && existing.__jsvmTemporalDifferenceType) {
+    return existing;
+  }
+  const RangeErrorCtor = runtimeGlobal.RangeError || RangeError;
+  const Ctor = function TemporalDifferenceType(...args) {
+    if (!new.target) {
+      throw new TypeError(`Temporal.${name} requires 'new'`);
+    }
+    defineDataProperty(this, "__jsvmTemporalType", name, false, false, true);
+    defineDataProperty(this, "__jsvmTemporalArgs", args, false, false, true);
+  };
+  const prototype = {};
+  const makeDifference = (methodName) => createNonConstructorMethod(function temporalDifference(_other, options = {}) {
+    validateTemporalUnitRange(options, units, RangeErrorCtor);
+    return new temporal.Duration();
+  }, 1);
+  const since = makeDifference("since");
+  defineBuiltinFunctionMetadata(since, "since", 1);
+  Object.defineProperty(prototype, "since", {
+    value: since,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const until = makeDifference("until");
+  defineBuiltinFunctionMetadata(until, "until", 1);
+  Object.defineProperty(prototype, "until", {
+    value: until,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(prototype, "constructor", {
+    value: Ctor,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(Ctor, "prototype", {
+    value: prototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  const from = createNonConstructorMethod(function from(value) {
+    return new Ctor(value);
+  }, 1);
+  defineBuiltinFunctionMetadata(from, "from", 1);
+  Object.defineProperty(Ctor, "from", {
+    value: from,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  defineBuiltinFunctionMetadata(Ctor, name, 0);
+  defineDataProperty(Ctor, "__jsvmTemporalDifferenceType", true, false, false, true);
+  Object.defineProperty(temporal, name, {
+    value: Ctor,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return Ctor;
+}
+
 function getOrCreateTemporalNamespace(runtimeGlobal) {
   if (runtimeGlobal.Temporal && (typeof runtimeGlobal.Temporal === "object" || typeof runtimeGlobal.Temporal === "function")) {
     return runtimeGlobal.Temporal;
@@ -2549,8 +4162,11 @@ function getOrCreateTemporalInstantIntrinsic(runtimeGlobal, temporal) {
 
   const Instant = typeof existing === "function"
     ? existing
-    : function Instant() {
-        throw new TypeError("Temporal.Instant cannot be constructed directly");
+    : function Instant(epochNanoseconds) {
+        if (!new.target) {
+          throw new TypeError("Temporal.Instant requires 'new'");
+        }
+        defineDataProperty(this, "epochNanoseconds", BigInt(epochNanoseconds), false, false, true);
       };
   const prototype = Instant.prototype && typeof Instant.prototype === "object"
     ? Instant.prototype
@@ -2568,6 +4184,41 @@ function getOrCreateTemporalInstantIntrinsic(runtimeGlobal, temporal) {
       value: function toString() {
         return `${this.epochNanoseconds}`;
       },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  if (typeof prototype.since !== "function") {
+    const validateInstantDifferenceOptions = (options) => {
+      validateTemporalUnitRange(
+        options,
+        ["hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"],
+        runtimeGlobal.RangeError || RangeError
+      );
+    };
+    const since = createNonConstructorMethod(function since(_other, options = {}) {
+      validateInstantDifferenceOptions(options);
+      return getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal).prototype
+        ? new temporal.Duration()
+        : undefined;
+    }, 1);
+    defineBuiltinFunctionMetadata(since, "since", 1);
+    Object.defineProperty(prototype, "since", {
+      value: since,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    const until = createNonConstructorMethod(function until(_other, options = {}) {
+      validateInstantDifferenceOptions(options);
+      return getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal).prototype
+        ? new temporal.Duration()
+        : undefined;
+    }, 1);
+    defineBuiltinFunctionMetadata(until, "until", 1);
+    Object.defineProperty(prototype, "until", {
+      value: until,
       writable: true,
       enumerable: false,
       configurable: true,
@@ -2726,6 +4377,296 @@ function normalizeIteratorBuiltins(runtimeGlobal) {
       configurable: true,
     });
   }
+  if (typeof IteratorCtor.zip !== "function") {
+    const zip = createNonConstructorMethod(function zip(iterables, options) {
+      return createIteratorZipKeyedHelper(
+        createZipRecords(iterables, options),
+        IteratorCtor.prototype
+      );
+    }, 1);
+    defineBuiltinFunctionMetadata(zip, "zip", 1);
+
+    Object.defineProperty(IteratorCtor, "zip", {
+      value: zip,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+function normalizeShadowRealmBuiltin(runtimeGlobal) {
+  if (typeof runtimeGlobal.ShadowRealm === "function" && runtimeGlobal.ShadowRealm.__jsvmShadowRealm) {
+    return;
+  }
+
+  const TypeErrorCtor = runtimeGlobal.TypeError || TypeError;
+  const SyntaxErrorCtor = runtimeGlobal.SyntaxError || SyntaxError;
+  const FunctionPrototype = runtimeGlobal.Function && runtimeGlobal.Function.prototype
+    ? runtimeGlobal.Function.prototype
+    : Function.prototype;
+  const ObjectPrototype = runtimeGlobal.Object && runtimeGlobal.Object.prototype
+    ? runtimeGlobal.Object.prototype
+    : Object.prototype;
+
+  const ShadowRealmCtor = function ShadowRealm() {
+    if (!new.target) {
+      throw new TypeErrorCtor("Constructor ShadowRealm requires 'new'");
+    }
+    const globalObject = buildRuntimeEnv({});
+    if (globalObject.Object && globalObject.Object.prototype) {
+      Object.setPrototypeOf(globalObject, globalObject.Object.prototype);
+    }
+    const realmState = {
+      globalObject,
+      context: null,
+      strictEvaluate: false,
+    };
+    const shadowEval = function shadowRealmEval(source) {
+      const evalSource = String(source);
+      if (realmState.strictEvaluate) {
+        Function(`"use strict";\n${evalSource}`);
+      }
+      return new nodeVm.Script(evalSource).runInContext(realmState.context);
+    };
+    defineDataProperty(globalObject, "eval", shadowEval, true, false, true);
+    realmState.context = nodeVm.createContext(globalObject);
+    shadowRealmStates.set(this, realmState);
+  };
+
+  const shadowRealmPrototype = Object.create(ObjectPrototype);
+  const evaluate = createNonConstructorMethod(function evaluate(sourceText) {
+    const state = shadowRealmStates.get(this);
+    if (!state) {
+      throw new TypeErrorCtor("ShadowRealm.prototype.evaluate called on incompatible receiver");
+    }
+    if (typeof sourceText !== "string") {
+      throw new TypeErrorCtor("ShadowRealm.prototype.evaluate requires a string");
+    }
+    try {
+      Function(sourceText);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new SyntaxErrorCtor(error.message);
+      }
+      throw error;
+    }
+
+    let result;
+    try {
+      result = evaluateInShadowRealmGlobal(state, sourceText);
+    } catch (error) {
+      throw new TypeErrorCtor(error && error.message ? error.message : "ShadowRealm evaluation failed");
+    }
+
+    return getShadowRealmReturnValue(result, runtimeGlobal, TypeErrorCtor, state.globalObject);
+  }, 1);
+  defineBuiltinFunctionMetadata(evaluate, "evaluate", 1);
+
+  const importValue = createNonConstructorMethod(function importValue(specifier, exportName) {
+    const state = shadowRealmStates.get(this);
+    if (!state) {
+      throw new TypeErrorCtor("ShadowRealm.prototype.importValue called on incompatible receiver");
+    }
+    String(specifier);
+    if (typeof exportName !== "string") {
+      throw new TypeErrorCtor("ShadowRealm.prototype.importValue exportName must be a string");
+    }
+    return Promise.reject(new TypeErrorCtor("ShadowRealm.prototype.importValue is not implemented"));
+  }, 2);
+  defineBuiltinFunctionMetadata(importValue, "importValue", 2);
+
+  Object.defineProperty(shadowRealmPrototype, "constructor", {
+    value: ShadowRealmCtor,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(shadowRealmPrototype, "evaluate", {
+    value: evaluate,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(shadowRealmPrototype, "importValue", {
+    value: importValue,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  if (typeof Symbol === "function" && Symbol.toStringTag) {
+    Object.defineProperty(shadowRealmPrototype, Symbol.toStringTag, {
+      value: "ShadowRealm",
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  Object.setPrototypeOf(ShadowRealmCtor, FunctionPrototype);
+  Object.defineProperty(ShadowRealmCtor, "prototype", {
+    value: shadowRealmPrototype,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  Object.defineProperty(ShadowRealmCtor, "__jsvmShadowRealm", {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  defineBuiltinFunctionMetadata(ShadowRealmCtor, "ShadowRealm", 0);
+
+  Object.defineProperty(runtimeGlobal, "ShadowRealm", {
+    value: ShadowRealmCtor,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+function evaluateInShadowRealmGlobal(state, sourceText) {
+  const executableSource = buildShadowRealmExecutableSource(sourceText);
+  const script = new nodeVm.Script(executableSource);
+  const previousStrictEvaluate = state.strictEvaluate;
+  state.strictEvaluate = hasUseStrictSourceDirective(sourceText);
+  try {
+    return script.runInContext(state.context);
+  } finally {
+    state.strictEvaluate = previousStrictEvaluate;
+  }
+}
+
+function buildShadowRealmExecutableSource(sourceText) {
+  let ast;
+  try {
+    ast = acorn.parse(sourceText, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: false,
+    });
+  } catch {
+    return sourceText;
+  }
+
+  let hasTopLevelLexical = false;
+  const functionNames = [];
+  for (const node of ast.body || []) {
+    if ((node.type === "VariableDeclaration" && (node.kind === "let" || node.kind === "const"))
+      || node.type === "ClassDeclaration") {
+      hasTopLevelLexical = true;
+    }
+    if (node.type === "FunctionDeclaration" && node.id && node.id.name) {
+      internalPush(functionNames, node.id.name);
+    }
+  }
+  if (!hasTopLevelLexical) {
+    return sourceText;
+  }
+
+  const body = ast.body || [];
+  const lastNode = body.length > 0 ? body[body.length - 1] : null;
+  const functionExports = functionNames
+    .map((name) => `\nglobalThis[${JSON.stringify(name)}] = ${name};`)
+    .join("");
+  if (lastNode && lastNode.type === "ExpressionStatement") {
+    const before = sourceText.slice(0, lastNode.start);
+    const expressionSource = sourceText.slice(lastNode.expression.start, lastNode.expression.end);
+    return `(function(){\n${before}${functionExports}\nreturn (${expressionSource});\n})()`;
+  }
+  return `(function(){\n${sourceText}${functionExports}\n})()`;
+}
+
+function getShadowRealmReturnValue(value, callerGlobal, TypeErrorCtor, targetGlobal = null) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  const valueType = typeof value;
+  if (valueType !== "object" && valueType !== "function") {
+    return value;
+  }
+  if (valueType === "function") {
+    return createShadowRealmWrappedFunction(value, callerGlobal, TypeErrorCtor, targetGlobal);
+  }
+  throw new TypeErrorCtor("ShadowRealm evaluate result must be primitive or callable");
+}
+
+function createShadowRealmWrappedFunction(target, callerGlobal, TypeErrorCtor, targetGlobal = null) {
+  let targetName;
+  let targetLength = 0;
+  try {
+    if (Object.prototype.hasOwnProperty.call(target, "length")) {
+      targetLength = target.length;
+    }
+    targetName = target.name;
+  } catch (error) {
+    throw new TypeErrorCtor(error && error.message ? error.message : "Cannot copy wrapped function metadata");
+  }
+
+  const length = normalizeCopiedFunctionLength(targetLength);
+  const wrapped = createNonConstructorMethod(function wrappedShadowRealmFunction(...args) {
+    const wrappedArgs = new Array(args.length);
+    for (let index = 0; index < args.length; index += 1) {
+      wrappedArgs[index] = getShadowRealmCallableArgument(args[index], TypeErrorCtor, targetGlobal);
+    }
+    let result;
+    try {
+      result = hostReflectApply(target, undefined, wrappedArgs);
+    } catch (error) {
+      throw new TypeErrorCtor(error && error.message ? error.message : "ShadowRealm wrapped function threw");
+    }
+    return getShadowRealmReturnValue(result, callerGlobal, TypeErrorCtor, targetGlobal);
+  }, length);
+  setFunctionPrototypeForRealm(wrapped, callerGlobal);
+  defineBuiltinFunctionMetadata(wrapped, typeof targetName === "string" ? targetName : "", length);
+  return wrapped;
+}
+
+function getShadowRealmCallableArgument(value, TypeErrorCtor, targetGlobal = null) {
+  if (typeof value === "function") {
+    const wrapped = createNonConstructorMethod(function wrappedShadowRealmArgument(...args) {
+      for (const arg of args) {
+        if (arg !== null && arg !== undefined && typeof arg === "object") {
+          throw new TypeErrorCtor("ShadowRealm wrapped function arguments must be primitive or callable");
+        }
+      }
+      let result;
+      try {
+        return hostReflectApply(value, undefined, args);
+      } catch (error) {
+        throw new TypeErrorCtor(error && error.message ? error.message : "ShadowRealm wrapped argument threw");
+      }
+    }, normalizeCopiedFunctionLength(value.length));
+    setFunctionPrototypeForRealm(wrapped, targetGlobal);
+    return wrapped;
+  }
+  if (value !== null && value !== undefined && typeof value === "object") {
+    throw new TypeErrorCtor("ShadowRealm wrapped function arguments must be primitive or callable");
+  }
+  return value;
+}
+
+function setFunctionPrototypeForRealm(fn, runtimeGlobal) {
+  const functionPrototype = runtimeGlobal && runtimeGlobal.Function && runtimeGlobal.Function.prototype
+    ? runtimeGlobal.Function.prototype
+    : null;
+  if (functionPrototype) {
+    Object.setPrototypeOf(fn, functionPrototype);
+  }
+}
+
+function normalizeCopiedFunctionLength(value) {
+  if (typeof value !== "number") {
+    return 0;
+  }
+  if (value === Infinity) {
+    return Infinity;
+  }
+  if (value === -Infinity || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.max(toIntegerOrInfinity(value), 0);
 }
 
 function normalizeGeneratorIteratorPrototype(iteratorPrototype) {
@@ -2799,7 +4740,7 @@ function createIteratorConcatHelper(records, iteratorPrototype) {
         throw new TypeError("Iterator helper is already executing");
       }
       if (state.done) {
-        return { done: true, value: undefined };
+        return createIteratorResultObject(undefined, true);
       }
 
       state.executing = true;
@@ -2890,13 +4831,7 @@ function createZipKeyedRecords(iterables, options) {
     throw new TypeError("Iterator.zipKeyed requires an object");
   }
 
-  const optionsObject = options === null || options === undefined ? undefined : Object(options);
-  const modeValue = optionsObject ? optionsObject.mode : undefined;
-  const mode = modeValue === undefined ? "shortest" : modeValue;
-  if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-    throw new TypeError("Iterator.zipKeyed mode must be shortest, longest, or strict");
-  }
-  const paddingObject = mode === "longest" && optionsObject ? optionsObject.padding : undefined;
+  const { mode, paddingOption } = normalizeZipOptions(options, "Iterator.zipKeyed");
 
   const records = [];
   try {
@@ -2911,23 +4846,158 @@ function createZipKeyedRecords(iterables, options) {
         continue;
       }
 
-      const iteratorRecord = getIteratorFlattenableRecord(value);
+      const iteratorRecord = getIteratorFlattenableRecord(value, { rejectPrimitives: true, requireNext: false });
       records.push({
         key,
         iterator: iteratorRecord.iterator,
         nextMethod: iteratorRecord.nextMethod,
         done: false,
-        padding: mode === "longest" && paddingObject !== null && paddingObject !== undefined
-          ? paddingObject[key]
-          : undefined,
+        padding: undefined,
       });
+    }
+    if (mode === "longest" && paddingOption !== undefined) {
+      for (const record of records) {
+        record.padding = paddingOption[record.key];
+      }
     }
   } catch (error) {
     closeOpenIterators(records, error);
     throw error;
   }
 
-  return { mode, records };
+  return { mode, records, resultKind: "object" };
+}
+
+function createZipRecords(iterables, options) {
+  if (iterables === null || iterables === undefined || (typeof iterables !== "object" && typeof iterables !== "function")) {
+    throw new TypeError("Iterator.zip requires an object");
+  }
+  const { mode, paddingOption } = normalizeZipOptions(options, "Iterator.zip");
+  const inputRecord = getIteratorRecord(iterables, "Iterator.zip requires an iterable");
+  const records = [];
+  let closeHandled = false;
+
+  try {
+    while (true) {
+      let nextValue;
+      try {
+        const next = inputRecord.nextMethod.call(inputRecord.iterator);
+        if (next === null || next === undefined || (typeof next !== "object" && typeof next !== "function")) {
+          throw new TypeError("Iterator result is not an object");
+        }
+        if (next.done) {
+          break;
+        }
+        nextValue = next.value;
+      } catch (error) {
+        closeOpenIterators(records, error);
+        closeHandled = true;
+        throw error;
+      }
+
+      let iteratorRecord;
+      try {
+        iteratorRecord = getIteratorFlattenableRecord(nextValue, { rejectPrimitives: true, requireNext: false });
+      } catch (error) {
+        closeOpenIterators([inputRecord].concat(records), error);
+        closeHandled = true;
+        throw error;
+      }
+      records.push({
+        iterator: iteratorRecord.iterator,
+        nextMethod: iteratorRecord.nextMethod,
+        done: false,
+        padding: undefined,
+      });
+    }
+
+    if (mode === "longest" && paddingOption !== undefined) {
+      if (paddingOption === null || (typeof paddingOption !== "object" && typeof paddingOption !== "function")) {
+        throw new TypeError("Iterator.zip padding must be an object");
+      }
+      let paddingRecord;
+      try {
+        paddingRecord = getIteratorRecord(paddingOption, "Iterator.zip padding must be iterable");
+      } catch (error) {
+        closeOpenIterators(records, error);
+        closeHandled = true;
+        throw error;
+      }
+      let usingPaddingIterator = true;
+      try {
+        for (let index = 0; index < records.length; index += 1) {
+          if (!usingPaddingIterator) {
+            records[index].padding = undefined;
+            continue;
+          }
+          const next = paddingRecord.nextMethod.call(paddingRecord.iterator);
+          if (next === null || next === undefined || (typeof next !== "object" && typeof next !== "function")) {
+            throw new TypeError("Iterator result is not an object");
+          }
+          if (next.done) {
+            usingPaddingIterator = false;
+            records[index].padding = undefined;
+            continue;
+          }
+          records[index].padding = next.value;
+        }
+        if (usingPaddingIterator) {
+          closeOpenIterators([paddingRecord]);
+        }
+      } catch (error) {
+        closeOpenIterators(records, error);
+        closeHandled = true;
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (!closeHandled) {
+      closeOpenIterators([inputRecord].concat(records), error);
+    }
+    throw error;
+  }
+
+  return { mode, records, resultKind: "array" };
+}
+
+function normalizeZipOptions(options, name) {
+  if (options !== undefined && (options === null || (typeof options !== "object" && typeof options !== "function"))) {
+    throw new TypeError(`${name} options must be an object`);
+  }
+  const optionsObject = options === undefined ? undefined : options;
+  const modeValue = optionsObject ? optionsObject.mode : undefined;
+  const mode = modeValue === undefined ? "shortest" : modeValue;
+  if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+    throw new TypeError(`${name} mode must be shortest, longest, or strict`);
+  }
+  const paddingOption = mode === "longest" && optionsObject ? optionsObject.padding : undefined;
+  if (
+    mode === "longest"
+    && paddingOption !== undefined
+    && (paddingOption === null || (typeof paddingOption !== "object" && typeof paddingOption !== "function"))
+  ) {
+    throw new TypeError(`${name} padding must be an object`);
+  }
+  return { mode, paddingOption };
+}
+
+function getIteratorRecord(value, message) {
+  if (value === null || value === undefined || (typeof value !== "object" && typeof value !== "function")) {
+    throw new TypeError(message);
+  }
+  const method = value[Symbol.iterator];
+  if (typeof method !== "function") {
+    throw new TypeError(message);
+  }
+  const iterator = method.call(value);
+  if (iterator === null || iterator === undefined || (typeof iterator !== "object" && typeof iterator !== "function")) {
+    throw new TypeError("Iterator expected an iterator object");
+  }
+  const nextMethod = iterator.next;
+  if (typeof nextMethod !== "function") {
+    throw new TypeError("Iterator expected a callable next method");
+  }
+  return { iterator, nextMethod };
 }
 
 function getIteratorFlattenableRecord(value, options = {}) {
@@ -2935,6 +5005,9 @@ function getIteratorFlattenableRecord(value, options = {}) {
   const isStringPrimitive = typeof value === "string";
   if (value === null || value === undefined || (!isStringPrimitive && typeof value !== "object" && typeof value !== "function")) {
     throw new TypeError("Iterator.zipKeyed requires object or iterator values");
+  }
+  if (options.rejectPrimitives && (typeof value !== "object" && typeof value !== "function")) {
+    throw new TypeError("Iterator.zip requires object iterator values");
   }
 
   const method = value[Symbol.iterator];
@@ -3149,8 +5222,10 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
   const state = {
     mode: zipState.mode,
     records: zipState.records,
+    resultKind: zipState.resultKind || "object",
     done: false,
     executing: false,
+    started: false,
   };
 
   const helper = Object.create(iteratorPrototype);
@@ -3161,19 +5236,20 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
         throw new TypeError("Iterator helper is already executing");
       }
       if (state.done) {
-        return { done: true, value: undefined };
+        return createIteratorResultObject(undefined, true);
       }
 
       state.executing = true;
       try {
         if (state.records.length === 0) {
           state.done = true;
-          return { done: true, value: undefined };
+          return createIteratorResultObject(undefined, true);
         }
 
         const row = new Array(state.records.length);
         let doneCount = 0;
         let sawDone = false;
+        let producedValue = false;
 
         for (let index = 0; index < state.records.length; index += 1) {
           const record = state.records[index];
@@ -3183,8 +5259,22 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
             continue;
           }
 
-          const result = record.nextMethod.call(record.iterator);
+          let result;
+          try {
+            if (typeof record.nextMethod !== "function") {
+              throw new TypeError("Iterator next method is not callable");
+            }
+            result = record.nextMethod.call(record.iterator);
+          } catch (error) {
+            record.done = true;
+            state.done = true;
+            closeActiveIterators(state.records, error);
+            throw error;
+          }
           if (result === null || result === undefined || (typeof result !== "object" && typeof result !== "function")) {
+            record.done = true;
+            state.done = true;
+            closeActiveIterators(state.records, new TypeError("Iterator result is not an object"));
             throw new TypeError("Iterator result is not an object");
           }
 
@@ -3193,35 +5283,47 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
             doneCount += 1;
             record.done = true;
             row[index] = record.padding;
+            if (state.mode === "strict" && producedValue) {
+              state.done = true;
+              const error = new TypeError("Iterator.zipKeyed strict mode requires equal lengths");
+              closeActiveIterators(state.records, error);
+              throw error;
+            }
             if (state.mode === "shortest") {
               state.done = true;
-              closeOpenIterators(state.records);
-              return { done: true, value: undefined };
+              closeActiveIterators(state.records);
+              return createIteratorResultObject(undefined, true);
             }
             continue;
           }
 
+          if (state.mode === "strict" && sawDone) {
+            state.done = true;
+            const error = new TypeError("Iterator.zipKeyed strict mode requires equal lengths");
+            closeActiveIterators(state.records, error);
+            throw error;
+          }
+
           row[index] = result.value;
+          producedValue = true;
         }
 
         if (state.mode === "strict" && sawDone) {
           state.done = true;
-          closeOpenIterators(state.records);
+          closeActiveIterators(state.records);
           if (doneCount !== state.records.length) {
             throw new TypeError("Iterator.zipKeyed strict mode requires equal lengths");
           }
-          return { done: true, value: undefined };
+          return createIteratorResultObject(undefined, true);
         }
 
         if (doneCount === state.records.length) {
           state.done = true;
-          return { done: true, value: undefined };
+          return createIteratorResultObject(undefined, true);
         }
 
-        return {
-          done: false,
-          value: createZipResultObject(state.records, row),
-        };
+        state.started = true;
+        return createIteratorResultObject(createZipResultValue(state.records, row, state.resultKind), false);
       } finally {
         state.executing = false;
       }
@@ -3237,14 +5339,19 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
         throw new TypeError("Iterator helper is already executing");
       }
       if (state.done) {
-        return { done: true, value: undefined };
+        return createIteratorResultObject(undefined, true);
+      }
+      if (!state.started) {
+        state.done = true;
+        closeActiveIterators(state.records);
+        return createIteratorResultObject(undefined, true);
       }
 
       state.executing = true;
       try {
-        closeOpenIterators(state.records);
+        closeActiveIterators(state.records);
         state.done = true;
-        return { done: true, value: undefined };
+        return createIteratorResultObject(undefined, true);
       } finally {
         state.executing = false;
       }
@@ -3255,6 +5362,39 @@ function createIteratorZipKeyedHelper(zipState, iteratorPrototype) {
   });
 
   return helper;
+}
+
+function closeActiveIterators(records, completionError = null) {
+  closeOpenIterators(records.filter((record) => record && !record.done), completionError);
+}
+
+function createIteratorResultObject(value, done) {
+  const result = {};
+  Object.defineProperty(result, "value", {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(result, "done", {
+    value: Boolean(done),
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  return result;
+}
+
+function createZipResultValue(records, values, kind) {
+  return kind === "array" ? createZipResultArray(values) : createZipResultObject(records, values);
+}
+
+function createZipResultArray(values) {
+  const result = new Array(values.length);
+  for (let index = 0; index < values.length; index += 1) {
+    defineOwnArrayElement(result, index, values[index]);
+  }
+  return result;
 }
 
 function createZipResultObject(records, values) {
@@ -3305,9 +5445,9 @@ function toStringValue(value) {
     throw new TypeError("Cannot convert object to primitive value");
   }
 
-  const toStringMethod = value.toString;
+  const toStringMethod = getObservableToStringMethod(value);
   if (typeof toStringMethod === "function") {
-    const stringResult = toStringMethod.call(value);
+    const stringResult = hostReflectApply(toStringMethod, value, []);
     if (isPrimitive(stringResult)) {
       return String(stringResult);
     }
@@ -3322,6 +5462,34 @@ function toStringValue(value) {
   }
 
   throw new TypeError("Cannot convert object to primitive value");
+}
+
+function getObservableToStringMethod(value) {
+  if (typeof value === "function" && value.__jsvmMeta) {
+    const ownDescriptor = Object.getOwnPropertyDescriptor(value, "toString");
+    if (ownDescriptor) {
+      if ("value" in ownDescriptor) {
+        return ownDescriptor.value;
+      }
+      return typeof ownDescriptor.get === "function"
+        ? hostReflectApply(ownDescriptor.get, value, [])
+        : undefined;
+    }
+    let current = Object.getPrototypeOf(value);
+    while (current) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, "toString");
+      if (descriptor) {
+        if ("value" in descriptor) {
+          return descriptor.value;
+        }
+        return typeof descriptor.get === "function"
+          ? hostReflectApply(descriptor.get, value, [])
+          : undefined;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  }
+  return value.toString;
 }
 
 function isPrimitive(value) {
@@ -3345,6 +5513,118 @@ function normalizeModuleNamespace(moduleValue, specifier = null) {
     default: moduleValue,
     __module: specifier,
   };
+}
+
+function createModuleNamespace(exportStore, specifier = null, exportNames = []) {
+  const namespace = Object.create(null);
+  defineDataProperty(namespace, Symbol.toStringTag, "Module", false, false, false);
+  defineDataProperty(namespace, "__jsvmModuleNamespace", true, false, false, false);
+  defineDataProperty(namespace, "__jsvmModuleSpecifier", specifier, false, false, false);
+  defineDataProperty(namespace, "__jsvmExportStore", exportStore, false, false, false);
+  for (const key of Array.from(new Set(exportNames)).sort()) {
+    defineModuleNamespaceBinding(namespace, exportStore, key);
+  }
+  Object.preventExtensions(namespace);
+  return namespace;
+}
+
+function finalizeModuleNamespace(namespace, exportStore) {
+  if (!namespace || namespace.__jsvmModuleNamespace !== true) {
+    return namespace;
+  }
+
+  for (const key of Object.keys(exportStore).sort()) {
+    if (Object.prototype.hasOwnProperty.call(namespace, key)) {
+      continue;
+    }
+    if (!Object.isExtensible(namespace)) {
+      continue;
+    }
+    defineModuleNamespaceBinding(namespace, exportStore, key);
+  }
+  Object.preventExtensions(namespace);
+  return namespace;
+}
+
+function defineModuleNamespaceBinding(namespace, exportStore, key) {
+    Object.defineProperty(namespace, key, {
+      get() {
+        return exportStore[key];
+      },
+      enumerable: true,
+      configurable: false,
+    });
+}
+
+function collectModuleExportNames(source) {
+  try {
+    const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    const names = new Set();
+    for (const statement of ast.body || []) {
+      if (!statement || typeof statement !== "object") {
+        continue;
+      }
+      if (statement.type === "ExportDefaultDeclaration") {
+        names.add("default");
+        continue;
+      }
+      if (statement.type === "ExportNamedDeclaration") {
+        if (statement.declaration) {
+          collectExportDeclarationNames(statement.declaration, names);
+        }
+        for (const specifier of statement.specifiers || []) {
+          const exported = specifier.exported;
+          if (exported) {
+            names.add(exported.type === "Identifier" ? exported.name : exported.value);
+          }
+        }
+      }
+    }
+    return Array.from(names);
+  } catch {
+    return [];
+  }
+}
+
+function collectExportDeclarationNames(declaration, names) {
+  if (declaration.type === "VariableDeclaration") {
+    for (const declarator of declaration.declarations || []) {
+      collectExportPatternNames(declarator.id, names);
+    }
+    return;
+  }
+  if ((declaration.type === "FunctionDeclaration" || declaration.type === "ClassDeclaration") && declaration.id) {
+    names.add(declaration.id.name);
+  }
+}
+
+function collectExportPatternNames(pattern, names) {
+  if (!pattern) {
+    return;
+  }
+  if (pattern.type === "Identifier") {
+    names.add(pattern.name);
+    return;
+  }
+  if (pattern.type === "RestElement") {
+    collectExportPatternNames(pattern.argument, names);
+    return;
+  }
+  if (pattern.type === "AssignmentPattern") {
+    collectExportPatternNames(pattern.left, names);
+    return;
+  }
+  if (pattern.type === "ArrayPattern") {
+    for (const element of pattern.elements || []) {
+      collectExportPatternNames(element, names);
+    }
+    return;
+  }
+  if (pattern.type === "ObjectPattern") {
+    for (const property of pattern.properties || []) {
+      collectExportPatternNames(property.type === "RestElement" ? property.argument : property.value, names);
+    }
+  }
 }
 
 function looksLikeESModule(source, filename) {

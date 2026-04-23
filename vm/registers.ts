@@ -1,9 +1,19 @@
 // @ts-nocheck
+const { defineDataProperty } = require("./descriptors");
+
 function registerIndex(registerName) {
-  if (typeof registerName !== "string" || !/^R\d+$/.test(registerName)) {
+  if (typeof registerName !== "string" || registerName.length < 2 || registerName[0] !== "R") {
     return null;
   }
-  return Number(registerName.slice(1));
+  let index = 0;
+  for (let offset = 1; offset < registerName.length; offset += 1) {
+    const digit = registerName[offset];
+    if (digit < "0" || digit > "9") {
+      return null;
+    }
+    index = (index * 10) + (digit - "0");
+  }
+  return index;
 }
 
 function createRegisters() {
@@ -20,12 +30,7 @@ function setRegister(registers, registerName, value) {
   if (index === null) {
     throw new Error(`Invalid register name: ${registerName}`);
   }
-  Object.defineProperty(registers, index, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(registers, index, value);
   return value;
 }
 

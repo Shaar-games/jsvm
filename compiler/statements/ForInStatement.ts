@@ -11,21 +11,20 @@ const {
 
 async function compileForInStatement(node, context) {
   const objectRegister = await compileExpression(node.right, context);
-  const objectCtorRegister = loadBindingValue(context, "Object");
-  const keysNameRegister = compileLiteralValue("keys", context);
-  const keysFunctionRegister = newRegister(context);
-  emit(context, [OpCode.GETFIELD, keysFunctionRegister, objectCtorRegister, keysNameRegister]);
+  const keysFunctionRegister = loadBindingValue(context, "__jsvmForInKeys");
   const keysArrayRegister = newRegister(context);
-  emit(context, [OpCode.CALL, keysFunctionRegister, 1, keysArrayRegister, objectCtorRegister, "default", objectRegister]);
+  emit(context, [OpCode.CALL, keysFunctionRegister, 1, keysArrayRegister, "null", "default", objectRegister]);
 
   const iteratorRegister = newRegister(context);
   const doneRegister = newRegister(context);
   const valueRegister = newRegister(context);
   const loopLabel = makeLabel(context, "FORIN");
   const endLabel = makeLabel(context, "ENDFORIN");
+  const loopLabelName = context.pendingLoopLabel || null;
+  context.pendingLoopLabel = null;
 
   emit(context, [OpCode.GETITER, iteratorRegister, keysArrayRegister]);
-  pushControlLabel(context, { continueLabel: loopLabel, breakLabel: endLabel });
+  pushControlLabel(context, { label: loopLabelName, continueLabel: loopLabel, breakLabel: endLabel });
   emitLabel(context, loopLabel);
   emit(context, [OpCode.ITERNEXT, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);

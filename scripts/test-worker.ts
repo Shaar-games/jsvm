@@ -6,7 +6,13 @@ const acorn = require("acorn");
 const { compileProgram } = require("../compiler/index");
 const { BytecodeVM, normalizeLegacyBuiltins } = require("../vm/index");
 const { createTest262Harness } = require("./test262-harness");
-const { buildVmSource, getVmExecutionPlan, parseTest262Metadata } = require("./test262-metadata");
+const { buildCompileSource, buildVmSource, getVmExecutionPlan, parseTest262Metadata } = require("./test262-metadata");
+
+process.on("unhandledRejection", () => {
+  // Individual VM cases report synchronous failures explicitly. Some native
+  // Promise builtins schedule follow-up jobs after fail-fast has already
+  // captured the result; do not let those jobs kill the worker process.
+});
 
 function getErrorMessage(error) {
   if (error instanceof Error) {
@@ -71,10 +77,11 @@ async function runCompileCase(fullPath, workspaceRoot, test262TestRoot) {
   const startedAt = Date.now();
   const code = fs.readFileSync(fullPath, "utf8");
   const metadata = parseTest262Metadata(code);
+  const compileSource = buildCompileSource(code, metadata);
 
   try {
     await silenceCompilerLogs(() =>
-      compileProgram(code, { sourceType: metadata.sourceType, filename: fullPath })
+      compileProgram(compileSource, { sourceType: metadata.sourceType, filename: fullPath })
     );
 
     if (metadata.expectCompileFailure) {
@@ -429,7 +436,7 @@ function synchronizeDeclaredNamesFromContext(runtimeGlobal, sandbox, names) {
 
 function collectTopLevelLexicalNames(source) {
   try {
-    const ast = acorn.parse(source, { ecmaVersion: 2022, sourceType: "script" });
+    const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "script" });
     const names = new Set();
     for (const statement of ast.body || []) {
       if (statement.type === "VariableDeclaration" && statement.kind !== "var") {
@@ -451,7 +458,7 @@ function collectTopLevelLexicalNames(source) {
 
 function collectTopLevelDeclaredNames(source) {
   try {
-    const ast = acorn.parse(source, { ecmaVersion: 2022, sourceType: "script" });
+    const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "script" });
     const names = new Set();
     for (const statement of ast.body || []) {
       if (statement.type === "VariableDeclaration") {
@@ -635,12 +642,12 @@ runBatch().catch((error) => {
 });
 
 function defineOwnArrayElement(array, value) {
-  Object.defineProperty(array, array.length, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  const descriptor = Object.create(null);
+  descriptor.value = value;
+  descriptor.writable = true;
+  descriptor.enumerable = true;
+  descriptor.configurable = true;
+  Object.defineProperty(array, array.length, descriptor);
 }
 
 export {};

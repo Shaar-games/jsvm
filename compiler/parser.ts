@@ -21,7 +21,7 @@ function parseSource(code, options = {}) {
 
   try {
     return acorn.parse(code, {
-      ecmaVersion: 2022,
+      ecmaVersion: "latest",
       sourceType,
       locations: true,
     });

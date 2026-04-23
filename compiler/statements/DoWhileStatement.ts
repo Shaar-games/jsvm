@@ -8,7 +8,9 @@ async function compileDoWhileStatement(node, context) {
   const startLabel = makeLabel(context, "DO_WHILE_START");
   const continueLabel = makeLabel(context, "DO_WHILE_CONTINUE");
   const endLabel = makeLabel(context, "DO_WHILE_END");
-  pushControlLabel(context, { continueLabel, breakLabel: endLabel });
+  const loopLabelName = context.pendingLoopLabel || null;
+  context.pendingLoopLabel = null;
+  pushControlLabel(context, { label: loopLabelName, continueLabel, breakLabel: endLabel });
 
   emitLabel(context, startLabel);
   await withAnnexBBlockFunctionContext(context, () => compileStatement(node.body, context));

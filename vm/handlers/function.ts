@@ -2,22 +2,19 @@
 const { OpCode } = require("../../bytecode/opcodes");
 const { createEnvironment } = require("../environment");
 const { createRegisters } = require("../registers");
+const { defineAccessorProperty, defineDataProperty } = require("../descriptors");
+const { getCompiledFunctionObjectPrototype } = require("../intrinsics");
+
+const hostReflectApply = Reflect.apply;
+const hostReflectConstruct = Reflect.construct;
+const hostReflectGetPrototypeOf = Reflect.getPrototypeOf;
+const hostReflectSetPrototypeOf = Reflect.setPrototypeOf;
 
 function prependInternalFrame(headValue, tailValues) {
   const result = new Array((tailValues ? tailValues.length : 0) + 1);
-  Object.defineProperty(result, 0, {
-    value: headValue,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(result, 0, headValue);
   for (let index = 0; index < (tailValues ? tailValues.length : 0); index += 1) {
-    Object.defineProperty(result, index + 1, {
-      value: tailValues[index],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    defineDataProperty(result, index + 1, tailValues[index]);
   }
   return result;
 }
@@ -25,12 +22,7 @@ function prependInternalFrame(headValue, tailValues) {
 function copyArgumentsObject(argsLike) {
   const result = new Array(argsLike.length);
   for (let index = 0; index < argsLike.length; index += 1) {
-    Object.defineProperty(result, index, {
-      value: argsLike[index],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    defineDataProperty(result, index, argsLike[index]);
   }
   return result;
 }
@@ -62,8 +54,105 @@ function isObjectLike(value) {
   return value !== null && value !== undefined && (typeof value === "object" || typeof value === "function");
 }
 
+function getObjectResult(result, fallback) {
+  return result && (typeof result === "object" || typeof result === "function") ? result : fallback;
+}
+
+function invokeSuperConstructor(state, argsValues) {
+  const superClass = state.superClass;
+  const homeClass = state.homeClass;
+  if (typeof superClass !== "function") {
+    throw new TypeError("super constructor is not callable");
+  }
+
+  const newTarget = state.newTarget || homeClass || superClass;
+  const result = hostReflectConstruct(superClass, argsValues, newTarget);
+  state.thisValue = result;
+  if (state.currentFunction) {
+    state.currentFunction.__jsvmLastSuperThis = result;
+  }
+  return result;
+}
+
+function getSuperProperty(state, property) {
+  const superClass = state.superClass;
+  if (typeof superClass !== "function" || superClass.prototype === null || superClass.prototype === undefined) {
+    throw new TypeError("super base is not available");
+  }
+  return Reflect.get(superClass.prototype, property, state.thisValue);
+}
+
+function installClassHome(fn, Klass) {
+  if (!fn || (typeof fn !== "object" && typeof fn !== "function")) {
+    return;
+  }
+  defineDataProperty(fn, "__jsvmHomeClass", Klass, true, false, true);
+  defineDataProperty(fn, "__jsvmSuperClass", Klass.__jsvmSuperClass || null, true, false, true);
+}
+
+function installCompiledFunctionObjectPrototype(vm, closure, functionMeta) {
+  const prototype = getCompiledFunctionObjectPrototype(vm.globalObject, functionMeta);
+  if (prototype && hostReflectGetPrototypeOf(closure) !== prototype) {
+    hostReflectSetPrototypeOf(closure, prototype);
+  }
+}
+
+function constructClassSync(Klass, instance, ctorArgs, newTarget = Klass) {
+  const constructorBody = Klass.prototype && Klass.prototype.constructorBody;
+  const superClass = Klass.__jsvmSuperClass || null;
+  if (typeof constructorBody !== "function") {
+    return superClass ? hostReflectConstruct(superClass, ctorArgs, newTarget || Klass) : instance;
+  }
+
+  delete constructorBody.__jsvmLastSuperThis;
+  const result = typeof constructorBody.__jsvmInvokeSync === "function"
+    ? constructorBody.__jsvmInvokeSync(instance, ctorArgs, newTarget || Klass)
+    : hostReflectApply(constructorBody, instance, ctorArgs);
+  const superThis = constructorBody.__jsvmLastSuperThis;
+  delete constructorBody.__jsvmLastSuperThis;
+  return getObjectResult(result, superClass ? (superThis || instance) : instance);
+}
+
+async function constructClass(Klass, instance, ctorArgs, newTarget = Klass) {
+  const constructorBody = Klass.prototype && Klass.prototype.constructorBody;
+  const superClass = Klass.__jsvmSuperClass || null;
+  if (typeof constructorBody !== "function") {
+    return superClass ? hostReflectConstruct(superClass, ctorArgs, newTarget || Klass) : instance;
+  }
+
+  delete constructorBody.__jsvmLastSuperThis;
+  const result = typeof constructorBody.__jsvmInvoke === "function"
+    ? await constructorBody.__jsvmInvoke(instance, ctorArgs, newTarget || Klass)
+    : hostReflectApply(constructorBody, instance, ctorArgs);
+  const superThis = constructorBody.__jsvmLastSuperThis;
+  delete constructorBody.__jsvmLastSuperThis;
+  return getObjectResult(result, superClass ? (superThis || instance) : instance);
+}
+
+function createClassShell(className, superClass) {
+  const Klass = function classFactory() {
+    if (!new.target) {
+      throw new TypeError("Class constructor cannot be invoked without 'new'");
+    }
+    const result = constructClassSync(Klass, this, copyArgumentsObject(arguments), new.target || Klass);
+    return getObjectResult(result, this);
+  };
+  defineDataProperty(Klass, "name", className || "AnonymousClass", false, false, true);
+  if (superClass) {
+    Klass.prototype = Object.create(superClass.prototype);
+    Object.setPrototypeOf(Klass, superClass);
+  }
+  Klass.prototype.constructor = Klass;
+  Klass.__jsvmClass = true;
+  Klass.__jsvmSuperClass = superClass || null;
+  Klass.__jsvmConstructSync = (instance, ctorArgs, newTarget = Klass) => constructClassSync(Klass, instance, ctorArgs, newTarget);
+  Klass.__jsvmConstruct = (instance, ctorArgs, newTarget = Klass) => constructClass(Klass, instance, ctorArgs, newTarget);
+  return Klass;
+}
+
 function defineClassElement(Klass, key, fn, kind, isStatic) {
   const target = isStatic ? Klass : Klass.prototype;
+  installClassHome(fn, Klass);
   if (kind === "constructor") {
     Klass.prototype.constructorBody = fn;
     return;
@@ -74,12 +163,14 @@ function defineClassElement(Klass, key, fn, kind, isStatic) {
       enumerable: false,
       configurable: true,
     };
-    Object.defineProperty(target, key, {
-      get: kind === "get" ? fn : current.get,
-      set: kind === "set" ? fn : current.set,
-      enumerable: false,
-      configurable: true,
-    });
+    defineAccessorProperty(
+      target,
+      key,
+      kind === "get" ? fn : current.get,
+      kind === "set" ? fn : current.set,
+      false,
+      true
+    );
     return;
   }
 
@@ -91,31 +182,37 @@ function installCompiledFunctionLegacyAccessors(vm, closure, functionMeta) {
     return;
   }
 
-  Object.defineProperty(closure, "caller", {
-    get() {
+  defineAccessorProperty(
+    closure,
+    "caller",
+    function getCaller() {
       return vm.getLegacyFunctionCaller(closure);
     },
-    set() {},
-    enumerable: false,
-    configurable: true,
-  });
-  Object.defineProperty(closure, "arguments", {
-    get() {
+    function setCaller() {},
+    false,
+    true
+  );
+  defineAccessorProperty(
+    closure,
+    "arguments",
+    function getArguments() {
       return null;
     },
-    set() {},
-    enumerable: false,
-    configurable: true,
-  });
+    function setArguments() {},
+    false,
+    true
+  );
 }
 
 function installCompiledFunctionMetadata(closure, functionMeta) {
-  Object.defineProperty(closure, "length", {
-    value: Number.isInteger(functionMeta.length) ? functionMeta.length : 0,
-    writable: false,
-    enumerable: false,
-    configurable: true,
-  });
+  defineDataProperty(
+    closure,
+    "length",
+    Number.isInteger(functionMeta.length) ? functionMeta.length : 0,
+    false,
+    false,
+    true
+  );
 }
 
 function createAsyncClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, globalObject = globalThis, newTarget = undefined) {
@@ -145,7 +242,7 @@ function invokeCallableSync(vm, state, fn, thisArg, argsValues, callMode, instru
     throw new TypeError(`${fn} is not a function`);
   }
 
-  return fn.apply(thisArg, argsValues);
+  return hostReflectApply(fn, thisArg, argsValues);
 }
 
 function invokeCallable(vm, state, fn, thisArg, argsValues, callMode, instruction = null) {
@@ -182,7 +279,7 @@ function invokeCallable(vm, state, fn, thisArg, argsValues, callMode, instructio
 
   return {
     awaitResult: false,
-    value: fn.apply(thisArg, argsValues),
+    value: hostReflectApply(fn, thisArg, argsValues),
   };
 }
 
@@ -273,6 +370,28 @@ async function handleFunction(vm, state, instruction) {
       state.setRegister(returnRegister, result);
       return null;
     }
+    case OpCode.SUPER_CALL: {
+      const returnRegister = instruction[1];
+      const argCount = instruction[2];
+      const argRegisters = instruction.slice(3);
+      const argsValues = argRegisters
+        .slice(0, argCount)
+        .map((registerName) => state.resolveValue(registerName));
+      state.setRegister(returnRegister, invokeSuperConstructor(state, argsValues));
+      return null;
+    }
+    case OpCode.SUPER_CALLSPREAD: {
+      const returnRegister = instruction[1];
+      const argsArrayRegister = instruction[2];
+      state.setRegister(returnRegister, invokeSuperConstructor(state, state.resolveValue(argsArrayRegister)));
+      return null;
+    }
+    case OpCode.SUPER_GET: {
+      const returnRegister = instruction[1];
+      const propertyRegister = instruction[2];
+      state.setRegister(returnRegister, getSuperProperty(state, state.resolveValue(propertyRegister)));
+      return null;
+    }
     case OpCode.CLOSURE: {
       const destRegister = instruction[1];
       const functionId = instruction[2];
@@ -285,6 +404,8 @@ async function handleFunction(vm, state, instruction) {
           const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
           nextState.currentFunction = closure;
           nextState.currentFunctionMeta = functionMeta;
+          nextState.homeClass = closure.__jsvmHomeClass || null;
+          nextState.superClass = closure.__jsvmSuperClass || null;
           return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
         });
       };
@@ -293,12 +414,15 @@ async function handleFunction(vm, state, instruction) {
           const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
           nextState.currentFunction = closure;
           nextState.currentFunctionMeta = functionMeta;
+          nextState.homeClass = closure.__jsvmHomeClass || null;
+          nextState.superClass = closure.__jsvmSuperClass || null;
           return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
         });
       };
       let closure;
       if (functionMeta.isGenerator) {
         closure = function generatorClosureInvoker() {
+          "use strict";
           const callArgs = copyArgumentsObject(arguments);
           return functionMeta.isAsync
             ? createAsyncGeneratorIterator(
@@ -324,6 +448,7 @@ async function handleFunction(vm, state, instruction) {
         };
       } else {
         closure = function closureInvoker() {
+          "use strict";
           const callArgs = copyArgumentsObject(arguments);
           if (!functionMeta.isAsync) {
             return runClosureSync(this, callArgs, new.target ? closure : undefined);
@@ -331,6 +456,7 @@ async function handleFunction(vm, state, instruction) {
           return runClosure(this, callArgs, new.target ? closure : undefined);
         };
       }
+      installCompiledFunctionObjectPrototype(vm, closure, functionMeta);
       if (!functionMeta.isGenerator) {
         closure.__jsvmInvoke = runClosure;
         closure.__jsvmConstruct = (thisArg, callArgs) => runClosure(thisArg, callArgs, closure);
@@ -388,7 +514,7 @@ async function handleFunction(vm, state, instruction) {
         );
         return null;
       }
-      state.setRegister(destRegister, Reflect.construct(Ctor, argsValues));
+      state.setRegister(destRegister, hostReflectConstruct(Ctor, argsValues));
       return null;
     }
     case OpCode.NEWSPREAD: {
@@ -419,7 +545,7 @@ async function handleFunction(vm, state, instruction) {
         );
         return null;
       }
-      state.setRegister(destRegister, Reflect.construct(Ctor, argsValues));
+      state.setRegister(destRegister, hostReflectConstruct(Ctor, argsValues));
       return null;
     }
     case OpCode.GETITER: {
@@ -470,26 +596,7 @@ async function handleFunction(vm, state, instruction) {
       const superRegister = instruction[3];
       const className = nameRegister === "null" ? "" : state.resolveValue(nameRegister);
       const superClass = superRegister === "null" ? null : state.resolveValue(superRegister);
-      const Klass = function classFactory() {};
-      Object.defineProperty(Klass, "name", { value: className || "AnonymousClass" });
-      if (superClass) {
-        Klass.prototype = Object.create(superClass.prototype);
-        Object.setPrototypeOf(Klass, superClass);
-      }
-      Klass.prototype.constructor = Klass;
-      Klass.__jsvmClass = true;
-      Klass.__jsvmConstructSync = (instance, ctorArgs) => {
-        let thisValue = instance;
-        if (superClass) {
-          thisValue = Reflect.construct(superClass, ctorArgs, Klass);
-        }
-        if (typeof thisValue.constructorBody === "function") {
-          const result = thisValue.constructorBody(...ctorArgs);
-          return result && (typeof result === "object" || typeof result === "function") ? result : thisValue;
-        }
-        return superClass ? thisValue : undefined;
-      };
-      Klass.__jsvmConstruct = async (instance, ctorArgs) => Klass.__jsvmConstructSync(instance, ctorArgs);
+      const Klass = createClassShell(className, superClass);
       state.setRegister(destRegister, Klass);
       return null;
     }
@@ -543,6 +650,28 @@ module.exports = {
         state.setRegister(returnRegister, result);
         return null;
       }
+      case OpCode.SUPER_CALL: {
+        const returnRegister = instruction[1];
+        const argCount = instruction[2];
+        const argRegisters = instruction.slice(3);
+        const argsValues = argRegisters
+          .slice(0, argCount)
+          .map((registerName) => state.resolveValue(registerName));
+        state.setRegister(returnRegister, invokeSuperConstructor(state, argsValues));
+        return null;
+      }
+      case OpCode.SUPER_CALLSPREAD: {
+        const returnRegister = instruction[1];
+        const argsArrayRegister = instruction[2];
+        state.setRegister(returnRegister, invokeSuperConstructor(state, state.resolveValue(argsArrayRegister)));
+        return null;
+      }
+      case OpCode.SUPER_GET: {
+        const returnRegister = instruction[1];
+        const propertyRegister = instruction[2];
+        state.setRegister(returnRegister, getSuperProperty(state, state.resolveValue(propertyRegister)));
+        return null;
+      }
       case OpCode.CLOSURE: {
         const destRegister = instruction[1];
         const functionId = instruction[2];
@@ -555,6 +684,8 @@ module.exports = {
             const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
             nextState.currentFunction = closure;
             nextState.currentFunctionMeta = functionMeta;
+            nextState.homeClass = closure.__jsvmHomeClass || null;
+            nextState.superClass = closure.__jsvmSuperClass || null;
             return vm.executeChunk(functionMeta.bytecode, functionMeta, callArgs, nextState);
           });
         };
@@ -563,12 +694,15 @@ module.exports = {
             const nextState = createClosureState(functionMeta, capturedEnvs, capturedBindingNames, lexicalThis, thisArg, vm.globalObject, newTarget);
             nextState.currentFunction = closure;
             nextState.currentFunctionMeta = functionMeta;
+            nextState.homeClass = closure.__jsvmHomeClass || null;
+            nextState.superClass = closure.__jsvmSuperClass || null;
             return vm.executeChunkSync(functionMeta.bytecode, functionMeta, callArgs, nextState);
           });
         };
         let closure;
         if (functionMeta.isGenerator) {
           closure = function generatorClosureInvoker() {
+            "use strict";
             const callArgs = copyArgumentsObject(arguments);
             return functionMeta.isAsync
               ? createAsyncGeneratorIterator(
@@ -594,6 +728,7 @@ module.exports = {
           };
         } else {
           closure = function closureInvoker() {
+            "use strict";
             const callArgs = copyArgumentsObject(arguments);
             if (!functionMeta.isAsync) {
               return runClosureSync(this, callArgs, new.target ? closure : undefined);
@@ -649,7 +784,7 @@ module.exports = {
           );
           return null;
         }
-        state.setRegister(destRegister, Reflect.construct(Ctor, argsValues));
+        state.setRegister(destRegister, hostReflectConstruct(Ctor, argsValues));
         return null;
       }
       case OpCode.NEWSPREAD: {
@@ -683,7 +818,7 @@ module.exports = {
           );
           return null;
         }
-        state.setRegister(destRegister, Reflect.construct(Ctor, argsValues));
+        state.setRegister(destRegister, hostReflectConstruct(Ctor, argsValues));
         return null;
       }
       case OpCode.GETITER: {
@@ -713,26 +848,7 @@ module.exports = {
         const superRegister = instruction[3];
         const className = nameRegister === "null" ? "" : state.resolveValue(nameRegister);
         const superClass = superRegister === "null" ? null : state.resolveValue(superRegister);
-        const Klass = function classFactory() {};
-        Object.defineProperty(Klass, "name", { value: className || "AnonymousClass" });
-        if (superClass) {
-          Klass.prototype = Object.create(superClass.prototype);
-          Object.setPrototypeOf(Klass, superClass);
-        }
-        Klass.prototype.constructor = Klass;
-        Klass.__jsvmClass = true;
-        Klass.__jsvmConstructSync = (instance, ctorArgs) => {
-          let thisValue = instance;
-          if (superClass) {
-            thisValue = Reflect.construct(superClass, ctorArgs, Klass);
-          }
-          if (typeof thisValue.constructorBody === "function") {
-            const result = thisValue.constructorBody(...ctorArgs);
-            return result && (typeof result === "object" || typeof result === "function") ? result : thisValue;
-          }
-          return superClass ? thisValue : undefined;
-        };
-        Klass.__jsvmConstruct = async (instance, ctorArgs) => Klass.__jsvmConstructSync(instance, ctorArgs);
+        const Klass = createClassShell(className, superClass);
         state.setRegister(destRegister, Klass);
         return null;
       }

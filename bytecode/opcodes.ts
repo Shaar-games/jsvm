@@ -80,7 +80,11 @@ const OP_NAMES = [
   "ASYNCITERNEXT",
   "TYPEOFNAME",
   "DEFINEFIELD",
-  "DELETEFIELD"
+  "DELETEFIELD",
+  "SUPER_CALL",
+  "SUPER_CALLSPREAD",
+  "SUPER_GET",
+  "OBJECTSPREAD"
 ];
 
 const OpCode = OP_NAMES.reduce((map, name, index) => {

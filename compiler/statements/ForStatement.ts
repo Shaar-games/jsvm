@@ -7,7 +7,9 @@ const { OpCode, emit, emitLabel, makeLabel, popControlLabel, pushControlLabel } 
 async function compileForStatement(node, context) {
   const startLabel = makeLabel(context);
   const endLabel = makeLabel(context);
-  pushControlLabel(context, { continueLabel: startLabel, breakLabel: endLabel });
+  const loopLabelName = context.pendingLoopLabel || null;
+  context.pendingLoopLabel = null;
+  pushControlLabel(context, { label: loopLabelName, continueLabel: startLabel, breakLabel: endLabel });
 
   if (node.init) {
     if (node.init.type.endsWith("Declaration")) {

@@ -153,10 +153,24 @@ function canExecuteInVmHost(code, metadata, hostRuntime = "node") {
   return getVmExecutionPlan(code, metadata, { hostRuntime }).eligible;
 }
 
+function shouldPrependOnlyStrictDirective(metadata) {
+  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
+    return true;
+  }
+  return false;
+}
+
+function buildCompileSource(code, metadata) {
+  if (shouldPrependOnlyStrictDirective(metadata)) {
+    return `"use strict";\n${code}`;
+  }
+  return code;
+}
+
 function buildVmSource(code, metadata, harnessRoot = null) {
   const sourceChunks = [];
 
-  if (metadata.sourceType === "script" && metadata.flags.includes("onlyStrict")) {
+  if (shouldPrependOnlyStrictDirective(metadata)) {
     sourceChunks.push(`"use strict";`);
   }
 
@@ -176,6 +190,7 @@ function buildVmSource(code, metadata, harnessRoot = null) {
 }
 
 module.exports = {
+  buildCompileSource,
   buildVmSource,
   canExecuteInVmHost,
   getVmExecutionPlan,

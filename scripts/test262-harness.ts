@@ -9,6 +9,10 @@ class Test262Error extends Error {
   }
 }
 
+Test262Error.thrower = function thrower(message) {
+  throw new Test262Error(message);
+};
+
 function isSameValue(left, right) {
   if (left === right) {
     return left !== 0 || 1 / left === 1 / right;
@@ -131,8 +135,8 @@ function createTest262Harness(options = {}) {
   function isWritable(obj, name, verifyProp, value) {
     const hadValue = Object.prototype.hasOwnProperty.call(obj, name);
     const oldValue = obj[name];
-    let newValue = arguments.length > 3 ? value : "unlikelyValue";
-    if (Object.is(newValue, oldValue)) {
+    let newValue = value || "unlikelyValue";
+    if (arguments.length < 4 && Object.is(newValue, oldValue)) {
       newValue = `${String(newValue)}2`;
     }
 
@@ -272,6 +276,47 @@ function createTest262Harness(options = {}) {
     }
   }
 
+  function verifyCallableProperty(obj, name, desc, options = {}) {
+    verifyProperty(obj, name, desc, options);
+    if (typeof obj[name] !== "function") {
+      throw new Test262Error(`Expected ${String(name)} to be callable`);
+    }
+  }
+
+  function verifyPrimordialCallableProperty(obj, name, functionName, functionLength, desc, options = {}) {
+    const value = obj[name];
+    const descriptor = desc === undefined
+      ? {
+          value,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        }
+      : { ...desc };
+    if (!Object.prototype.hasOwnProperty.call(descriptor, "value")
+      && !Object.prototype.hasOwnProperty.call(descriptor, "get")) {
+      descriptor.value = value;
+    }
+
+    verifyCallableProperty(obj, name, descriptor, options);
+
+    const resolvedName = functionName === undefined
+      ? (typeof name === "symbol" ? `[${name.description}]` : name)
+      : functionName;
+    verifyProperty(value, "name", {
+      value: resolvedName,
+      writable: false,
+      enumerable: false,
+      configurable: descriptor.configurable,
+    }, options);
+    verifyProperty(value, "length", {
+      value: functionLength,
+      writable: false,
+      enumerable: false,
+      configurable: descriptor.configurable,
+    }, options);
+  }
+
   function createRealm() {
     if (typeof options.createRealm === "function") {
       return options.createRealm();
@@ -317,7 +362,7 @@ function createTest262Harness(options = {}) {
     verifyConfigurable,
     verifyNotConfigurable,
     isConstructor,
-    verifyPrimordialCallableProperty: verifyCallableProperty,
+    verifyPrimordialCallableProperty,
     print: () => {},
   };
 }

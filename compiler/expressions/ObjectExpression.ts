@@ -54,6 +54,12 @@ async function compileObjectExpression(node, context) {
   emit(context, [OpCode.OBJECT, objectRegister]);
 
   for (const property of node.properties) {
+    if (property.type === "SpreadElement") {
+      const sourceRegister = await compileExpression(property.argument, context);
+      emit(context, [OpCode.OBJECTSPREAD, objectRegister, sourceRegister]);
+      continue;
+    }
+
     if (property.type !== "Property") {
       throw new Error(`Unsupported object property type: ${property.type}`);
     }

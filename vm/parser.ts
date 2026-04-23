@@ -1,4 +1,6 @@
 // @ts-nocheck
+const { defineDataProperty } = require("./descriptors");
+
 function parseBytecode(bytecode) {
   const labels = new Map();
   const instructions = [];
@@ -16,12 +18,7 @@ function parseBytecode(bytecode) {
 }
 
 function defineOwnArrayElement(array, value) {
-  Object.defineProperty(array, array.length, {
-    value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  defineDataProperty(array, array.length, value);
 }
 
 function buildFunctionTable(functions, table = new Map()) {

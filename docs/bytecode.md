@@ -83,6 +83,10 @@ Bindings currently use TDZ-like failure on read-before-init.
   must not affect element creation.
 - `DELETEFIELD destReg objectReg keyReg`
   Deletes a property and stores the boolean result.
+- `OBJECTSPREAD objectReg sourceReg`
+  Implements object literal spread. `null` and `undefined` sources are ignored;
+  other sources are converted to objects and their own enumerable string and
+  symbol keys are copied as writable, enumerable, configurable data properties.
 
 ## Arithmetic / Comparison
 
@@ -118,6 +122,14 @@ Bindings currently use TDZ-like failure on read-before-init.
   Creates a callable closure capturing the current lexical environments.
 - `CALL fnReg argCount retReg thisReg ...argRegs`
   Invokes a callable value.
+- `SUPER_CALL retReg argCount ...argRegs`
+  Invokes the active class constructor's super constructor and updates the
+  active `this` binding to the object returned by `Reflect.construct`.
+- `SUPER_CALLSPREAD retReg argsArrayReg`
+  Spread-argument form of `SUPER_CALL`.
+- `SUPER_GET retReg propertyReg`
+  Reads a property from the active class constructor's super prototype using
+  the active `this` value as the receiver.
 - `NEW retReg ctorReg argCount ...argRegs`
   Constructs an object via a native constructor or compiled closure constructor.
 - `AWAIT destReg srcReg`
@@ -162,5 +174,5 @@ Bindings currently use TDZ-like failure on read-before-init.
 ## Current Limits
 
 - lexical bindings are slot-based, but `const` write protection is not fully enforced yet
-- `try/finally`, `super`, private fields, async generators and full module linkage are not complete
+- `try/finally`, private fields, async generators and full module linkage are not complete
 - class lowering covers basic constructor/prototype/static methods only

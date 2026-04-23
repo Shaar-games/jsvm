@@ -18,9 +18,11 @@ async function compileForOfStatement(node, context) {
   const endLabel = makeLabel(context, "ENDFOROF");
   const getIteratorOp = node.await ? OpCode.GETASYNCITER : OpCode.GETITER;
   const nextOp = node.await ? OpCode.ASYNCITERNEXT : OpCode.ITERNEXT;
+  const loopLabelName = context.pendingLoopLabel || null;
+  context.pendingLoopLabel = null;
 
   emit(context, [getIteratorOp, iteratorRegister, iterableRegister]);
-  pushControlLabel(context, { continueLabel: loopLabel, breakLabel: endLabel });
+  pushControlLabel(context, { label: loopLabelName, continueLabel: loopLabel, breakLabel: endLabel });
   emitLabel(context, loopLabel);
   emit(context, [nextOp, doneRegister, valueRegister, iteratorRegister]);
   emit(context, [OpCode.JUMPT, doneRegister, endLabel]);

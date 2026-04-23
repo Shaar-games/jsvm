@@ -6,7 +6,7 @@ const { fork } = require("child_process");
 const { compileProgram } = require("../compiler/index");
 const { executeCompiledProgram } = require("../vm/index");
 const { findWorkspaceRoot } = require("./paths");
-const { canExecuteInVmHost, parseTest262Metadata } = require("./test262-metadata");
+const { buildCompileSource, canExecuteInVmHost, parseTest262Metadata } = require("./test262-metadata");
 
 const workspaceRoot = findWorkspaceRoot(__dirname);
 const reportsDir = path.join(workspaceRoot, "reports");
@@ -465,10 +465,11 @@ async function runTest262CompilerSuite() {
       const startedAt = Date.now();
       const code = fs.readFileSync(fullPath, "utf8");
       const metadata = parseTest262Metadata(code);
+      const compileSource = buildCompileSource(code, metadata);
 
       try {
         await silenceCompilerLogs(() =>
-          compileProgram(code, { sourceType: metadata.sourceType, filename: fullPath })
+          compileProgram(compileSource, { sourceType: metadata.sourceType, filename: fullPath })
         );
         if (metadata.expectCompileFailure) {
           results.push({
