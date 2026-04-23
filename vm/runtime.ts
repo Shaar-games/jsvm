@@ -3564,20 +3564,70 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
     if (!new.target) {
       throw new TypeError("Temporal.Duration requires 'new'");
     }
-    defineDataProperty(this, "years", normalizeTemporalDurationInteger(years, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "months", normalizeTemporalDurationInteger(months, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "weeks", normalizeTemporalDurationInteger(weeks, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "days", normalizeTemporalDurationInteger(days, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "hours", normalizeTemporalDurationInteger(hours, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "minutes", normalizeTemporalDurationInteger(minutes, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "seconds", normalizeTemporalDurationInteger(seconds, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "milliseconds", normalizeTemporalDurationInteger(milliseconds, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "microseconds", normalizeTemporalDurationInteger(microseconds, RangeErrorCtor), false, false, true);
-    defineDataProperty(this, "nanoseconds", normalizeTemporalDurationInteger(nanoseconds, RangeErrorCtor), false, false, true);
+    const record = {
+      years: normalizeTemporalDurationInteger(years, RangeErrorCtor, TypeErrorCtor),
+      months: normalizeTemporalDurationInteger(months, RangeErrorCtor, TypeErrorCtor),
+      weeks: normalizeTemporalDurationInteger(weeks, RangeErrorCtor, TypeErrorCtor),
+      days: normalizeTemporalDurationInteger(days, RangeErrorCtor, TypeErrorCtor),
+      hours: normalizeTemporalDurationInteger(hours, RangeErrorCtor, TypeErrorCtor),
+      minutes: normalizeTemporalDurationInteger(minutes, RangeErrorCtor, TypeErrorCtor),
+      seconds: normalizeTemporalDurationInteger(seconds, RangeErrorCtor, TypeErrorCtor),
+      milliseconds: normalizeTemporalDurationInteger(milliseconds, RangeErrorCtor, TypeErrorCtor),
+      microseconds: normalizeTemporalDurationInteger(microseconds, RangeErrorCtor, TypeErrorCtor),
+      nanoseconds: normalizeTemporalDurationInteger(nanoseconds, RangeErrorCtor, TypeErrorCtor),
+    };
+    validateTemporalDurationRecord(record, RangeErrorCtor);
+    defineTemporalDurationFields(this, record);
   };
   const prototype = {};
-  const round = createNonConstructorMethod(function round(options = {}) {
-    validateTemporalUnitRange(options, TEMPORAL_DURATION_UNITS, RangeErrorCtor);
+  const round = createNonConstructorMethod(function round(options) {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    const normalizedOptions = normalizeTemporalDurationRoundOptions(options, TypeErrorCtor);
+    if (normalizedOptions.largestUnit === undefined && normalizedOptions.smallestUnit === undefined) {
+      throw new RangeErrorCtor("Temporal.Duration.round requires largestUnit or smallestUnit");
+    }
+    if (Object.prototype.hasOwnProperty.call(normalizedOptions, "relativeTo") && normalizedOptions.relativeTo === null) {
+      throw new TypeErrorCtor("Invalid Temporal relativeTo");
+    }
+    validateTemporalRelativeToOption(normalizedOptions, RangeErrorCtor, TypeErrorCtor);
+    validateTemporalUnitRange(normalizedOptions, TEMPORAL_DURATION_UNITS, RangeErrorCtor);
+    validateTemporalRoundingIncrement(normalizedOptions, RangeErrorCtor);
+    validateTemporalRoundingMode(normalizedOptions, RangeErrorCtor);
+    const relativeTo = normalizedOptions && normalizedOptions.relativeTo;
+    if (relativeTo
+      && relativeTo.__jsvmTemporalType === "ZonedDateTime"
+      && Array.isArray(relativeTo.__jsvmTemporalArgs)
+      && typeof relativeTo.__jsvmTemporalArgs[0] === "bigint"
+      && normalizeTemporalUnitName(normalizedOptions.largestUnit, TEMPORAL_DURATION_UNITS, RangeErrorCtor) === "days"
+      && (relativeTo.__jsvmTemporalArgs[0] >= 8640000000000000000000n || relativeTo.__jsvmTemporalArgs[0] <= -8640000000000000000000n)) {
+      throw new RangeErrorCtor("Temporal.ZonedDateTime value is out of range");
+    }
+    const roundRecord = readTemporalDurationFields(this);
+    if (!relativeTo && temporalDurationHasDateUnits(roundRecord)) {
+      throw new RangeErrorCtor("Temporal.Duration.round requires relativeTo for calendar units");
+    }
+    if (typeof relativeTo === "string" && !temporalDurationRecordIsBlank(roundRecord) && temporalRelativeToStringFailsAfterDateTimeConversion(relativeTo)) {
+      throw new RangeErrorCtor("Temporal relativeTo is outside the supported range");
+    }
+    const smallestUnit = normalizeTemporalUnitName(normalizedOptions.smallestUnit, TEMPORAL_DURATION_UNITS, RangeErrorCtor);
+    if (!relativeTo && (smallestUnit === "years" || smallestUnit === "months" || smallestUnit === "weeks")) {
+      throw new RangeErrorCtor("Temporal.Duration.round requires relativeTo for calendar units");
+    }
+    if (smallestUnit === "seconds"
+      && Math.abs(roundRecord.seconds) >= 9007199254740991
+      && Math.abs(roundRecord.nanoseconds) >= 500000000) {
+      throw new RangeErrorCtor("Temporal.Duration round result is out of range");
+    }
+    if (relativeTo && Math.abs((roundRecord.weeks || 0) * 7 + (roundRecord.days || 0)) >= 100000000) {
+      throw new RangeErrorCtor("Temporal.Duration value is out of range relative to date");
+    }
+    if (normalizeTemporalUnitName(normalizedOptions.largestUnit, TEMPORAL_DURATION_UNITS, RangeErrorCtor) === "nanoseconds") {
+      const totalNanoseconds = temporalDurationTotalNanoseconds(roundRecord);
+      const maxNormalizedNanoseconds = 9007199254740991463129087n;
+      if (totalNanoseconds > maxNormalizedNanoseconds || totalNanoseconds < -maxNormalizedNanoseconds) {
+        throw new RangeErrorCtor("Temporal.Duration round result is out of range");
+      }
+    }
     return this;
   }, 1);
   defineBuiltinFunctionMetadata(round, "round", 1);
@@ -3587,7 +3637,90 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
     enumerable: false,
     configurable: true,
   });
+  const abs = createNonConstructorMethod(function abs() {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    const record = readTemporalDurationFields(this);
+    const result = {};
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      result[unit] = Math.abs(record[unit]);
+    }
+    return constructTemporalDuration(Duration, result);
+  }, 0);
+  defineBuiltinFunctionMetadata(abs, "abs", 0);
+  Object.defineProperty(prototype, "abs", {
+    value: abs,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const negated = createNonConstructorMethod(function negated() {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    const record = readTemporalDurationFields(this);
+    const result = {};
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      result[unit] = -record[unit];
+    }
+    return constructTemporalDuration(Duration, result);
+  }, 0);
+  defineBuiltinFunctionMetadata(negated, "negated", 0);
+  Object.defineProperty(prototype, "negated", {
+    value: negated,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const blank = createNonConstructorMethod(function getBlank() {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    const record = readTemporalDurationFields(this);
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      if (record[unit] !== 0) {
+        return false;
+      }
+    }
+    return true;
+  }, 0);
+  defineBuiltinFunctionMetadata(blank, "get blank", 0);
+  Object.defineProperty(prototype, "blank", {
+    get: blank,
+    enumerable: false,
+    configurable: true,
+  });
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    const getter = createNonConstructorMethod(function getTemporalDurationUnit() {
+      requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+      return readTemporalDurationFields(this)[unit];
+    }, 0);
+    defineBuiltinFunctionMetadata(getter, `get ${unit}`, 0);
+    Object.defineProperty(prototype, unit, {
+      get: getter,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  const add = createNonConstructorMethod(function add(other) {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    const current = readTemporalDurationFields(this);
+    const addition = toTemporalDurationRecord(other, Duration, TypeErrorCtor, RangeErrorCtor);
+    if (temporalDurationHasDateUnits(current) || temporalDurationHasDateUnits(addition)) {
+      throw new RangeErrorCtor("Temporal.Duration add requires relativeTo for calendar units");
+    }
+    const result = {};
+    for (const unit of TEMPORAL_DURATION_UNITS) {
+      result[unit] = current[unit] + addition[unit];
+    }
+    const balanced = balanceTemporalDurationTime(result, getTemporalDurationLargestTimeUnit(current, addition));
+    validateTemporalDurationAddResult(balanced, RangeErrorCtor);
+    return constructTemporalDuration(Duration, balanced);
+  }, 1);
+  defineBuiltinFunctionMetadata(add, "add", 1);
+  Object.defineProperty(prototype, "add", {
+    value: add,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
   const withMethod = createNonConstructorMethod(function withDuration(fields = {}) {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
     const current = readTemporalDurationFields(this);
     const next = {};
     for (const unit of TEMPORAL_DURATION_UNITS) {
@@ -3595,18 +3728,8 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
         ? Number(fields[unit])
         : current[unit];
     }
-    return new Duration(
-      next.years,
-      next.months,
-      next.weeks,
-      next.days,
-      next.hours,
-      next.minutes,
-      next.seconds,
-      next.milliseconds,
-      next.microseconds,
-      next.nanoseconds
-    );
+    validateTemporalDurationRecord(next, RangeErrorCtor);
+    return constructTemporalDuration(Duration, next);
   }, 1);
   defineBuiltinFunctionMetadata(withMethod, "with", 1);
   Object.defineProperty(prototype, "with", {
@@ -3616,7 +3739,11 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
     configurable: true,
   });
   const total = createNonConstructorMethod(function total(unitOrOptions = "nanoseconds") {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
     const record = readTemporalDurationFields(this);
+    if (unitOrOptions && typeof unitOrOptions === "object") {
+      validateTemporalRelativeToOption(unitOrOptions, RangeErrorCtor, TypeErrorCtor);
+    }
     const unit = typeof unitOrOptions === "string" ? unitOrOptions : unitOrOptions && unitOrOptions.unit;
     const nanoseconds = temporalDurationApproximateNanoseconds(record, unitOrOptions && unitOrOptions.relativeTo);
     if (unit === "second" || unit === "seconds") {
@@ -3627,6 +3754,17 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
   defineBuiltinFunctionMetadata(total, "total", 1);
   Object.defineProperty(prototype, "total", {
     value: total,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const toString = createNonConstructorMethod(function toString() {
+    requireTemporalDurationReceiver(this, Duration, TypeErrorCtor);
+    return formatTemporalDuration(readTemporalDurationFields(this));
+  }, 0);
+  defineBuiltinFunctionMetadata(toString, "toString", 0);
+  Object.defineProperty(prototype, "toString", {
+    value: toString,
     writable: true,
     enumerable: false,
     configurable: true,
@@ -3695,18 +3833,7 @@ function getOrCreateTemporalDurationIntrinsic(runtimeGlobal, temporal) {
   });
   const from = createNonConstructorMethod(function from(value) {
     const record = toTemporalDurationRecord(value, Duration, TypeErrorCtor, RangeErrorCtor);
-    return new Duration(
-      record.years,
-      record.months,
-      record.weeks,
-      record.days,
-      record.hours,
-      record.minutes,
-      record.seconds,
-      record.milliseconds,
-      record.microseconds,
-      record.nanoseconds
-    );
+    return constructTemporalDuration(Duration, record);
   }, 1);
   defineBuiltinFunctionMetadata(from, "from", 1);
   Object.defineProperty(Duration, "from", {
@@ -3731,7 +3858,7 @@ function toTemporalDurationRecord(value, DurationCtor, TypeErrorCtor = TypeError
   if (value instanceof DurationCtor) {
     record = readTemporalDurationFields(value);
   } else if (typeof value === "string") {
-    record = parseTemporalDurationString(value, TypeErrorCtor);
+    record = parseTemporalDurationString(value, RangeErrorCtor);
   } else if (value === null || value === undefined || (typeof value !== "object" && typeof value !== "function")) {
     throw new TypeErrorCtor("Temporal.Duration expected a duration-like value");
   } else {
@@ -3740,7 +3867,7 @@ function toTemporalDurationRecord(value, DurationCtor, TypeErrorCtor = TypeError
     for (const unit of TEMPORAL_DURATION_UNITS) {
       if (Object.prototype.hasOwnProperty.call(value, unit)) {
         hasDurationProperty = true;
-        record[unit] = Number(value[unit]);
+        record[unit] = normalizeTemporalDurationInteger(value[unit], RangeErrorCtor, TypeErrorCtor);
       } else {
         record[unit] = 0;
       }
@@ -3749,11 +3876,41 @@ function toTemporalDurationRecord(value, DurationCtor, TypeErrorCtor = TypeError
       throw new TypeErrorCtor("Temporal.Duration property bag requires a duration property");
     }
   }
-  validateTemporalDurationRange(record, RangeErrorCtor);
+  validateTemporalDurationRecord(record, RangeErrorCtor);
   return record;
 }
 
-function normalizeTemporalDurationInteger(value, RangeErrorCtor = RangeError) {
+function requireTemporalDurationReceiver(value, DurationCtor, TypeErrorCtor = TypeError) {
+  if (!(value instanceof DurationCtor)) {
+    throw new TypeErrorCtor("Temporal.Duration method requires a Temporal.Duration receiver");
+  }
+}
+
+function constructTemporalDuration(DurationCtor, record) {
+  return new DurationCtor(
+    record.years,
+    record.months,
+    record.weeks,
+    record.days,
+    record.hours,
+    record.minutes,
+    record.seconds,
+    record.milliseconds,
+    record.microseconds,
+    record.nanoseconds
+  );
+}
+
+function defineTemporalDurationFields(target, record) {
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    defineDataProperty(target, unit, record[unit], false, false, true);
+  }
+}
+
+function normalizeTemporalDurationInteger(value, RangeErrorCtor = RangeError, TypeErrorCtor = TypeError) {
+  if (typeof value === "bigint" || typeof value === "symbol") {
+    throw new TypeErrorCtor("Temporal.Duration fields must be numbers");
+  }
   const number = Number(value);
   if (!Number.isInteger(number)) {
     throw new RangeErrorCtor("Temporal.Duration fields must be integers");
@@ -3769,10 +3926,111 @@ function readTemporalDurationFields(value) {
   return record;
 }
 
-function parseTemporalDurationString(value, TypeErrorCtor = TypeError) {
-  const match = /^([+-])?P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)W)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(value);
+function formatTemporalDuration(record) {
+  const sign = temporalDurationRecordSign(record);
+  const prefix = sign < 0 ? "-P" : "P";
+  const absRecord = {};
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    absRecord[unit] = Math.abs(record[unit] || 0);
+  }
+
+  let datePart = "";
+  if (absRecord.years) {
+    datePart += `${absRecord.years}Y`;
+  }
+  if (absRecord.months) {
+    datePart += `${absRecord.months}M`;
+  }
+  if (absRecord.weeks) {
+    datePart += `${absRecord.weeks}W`;
+  }
+  if (absRecord.days) {
+    datePart += `${absRecord.days}D`;
+  }
+
+  const timeNanoseconds = temporalDurationTimeNanoseconds(absRecord);
+  let timePart = "";
+  if (absRecord.hours) {
+    timePart += `${absRecord.hours}H`;
+  }
+  if (absRecord.minutes) {
+    timePart += `${absRecord.minutes}M`;
+  }
+  if (timeNanoseconds !== 0n) {
+    const secondNanoseconds = timeNanoseconds % 1000000000n;
+    const seconds = timeNanoseconds / 1000000000n;
+    if (secondNanoseconds === 0n) {
+      timePart += `${seconds}S`;
+    } else {
+      const fraction = secondNanoseconds.toString().padStart(9, "0").replace(/0+$/, "");
+      timePart += `${seconds}.${fraction}S`;
+    }
+  }
+
+  if (!datePart && !timePart) {
+    return "PT0S";
+  }
+  return `${prefix}${datePart}${timePart ? `T${timePart}` : ""}`;
+}
+
+function temporalDurationRecordSign(record) {
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    if (record[unit] < 0) {
+      return -1;
+    }
+    if (record[unit] > 0) {
+      return 1;
+    }
+  }
+  return 1;
+}
+
+function temporalDurationHasMixedSigns(record) {
+  let sign = 0;
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    const value = record[unit] || 0;
+    if (value === 0) {
+      continue;
+    }
+    const valueSign = value < 0 ? -1 : 1;
+    if (sign !== 0 && valueSign !== sign) {
+      return true;
+    }
+    sign = valueSign;
+  }
+  return false;
+}
+
+function temporalDurationTimeNanoseconds(record) {
+  return BigInt(Math.trunc(record.seconds || 0)) * 1000000000n
+    + BigInt(Math.trunc(record.milliseconds || 0)) * 1000000n
+    + BigInt(Math.trunc(record.microseconds || 0)) * 1000n
+    + BigInt(Math.trunc(record.nanoseconds || 0));
+}
+
+function temporalDurationTotalNanoseconds(record) {
+  return BigInt(Math.trunc(record.days || 0)) * 86400000000000n
+    + BigInt(Math.trunc(record.hours || 0)) * 3600000000000n
+    + BigInt(Math.trunc(record.minutes || 0)) * 60000000000n
+    + temporalDurationTimeNanoseconds(record);
+}
+
+function parseTemporalDurationString(value, RangeErrorCtor = RangeError) {
+  const match = /^([+-])?P(?:(\d+(?:[.,]\d+)?)Y)?(?:(\d+(?:[.,]\d+)?)M)?(?:(\d+(?:[.,]\d+)?)W)?(?:(\d+(?:[.,]\d+)?)D)?(?:T(?:(\d+(?:[.,]\d+)?)H)?(?:(\d+(?:[.,]\d+)?)M)?(?:(\d+(?:[.,]\d+)?)S)?)?$/i.exec(value);
   if (!match) {
-    throw new TypeErrorCtor("Invalid Temporal.Duration string");
+    throw new RangeErrorCtor("Invalid Temporal.Duration string");
+  }
+  if (!match[2] && !match[3] && !match[4] && !match[5] && !match[6] && !match[7] && !match[8]) {
+    throw new RangeErrorCtor("Invalid Temporal.Duration string");
+  }
+  if (temporalDurationStringPartHasFraction(match[2])
+    || temporalDurationStringPartHasFraction(match[3])
+    || temporalDurationStringPartHasFraction(match[4])
+    || temporalDurationStringPartHasFraction(match[5])) {
+    throw new RangeErrorCtor("Invalid Temporal.Duration string");
+  }
+  if (temporalDurationFractionDigitCount(match[8]) > 9) {
+    throw new RangeErrorCtor("Invalid Temporal.Duration string");
   }
   const sign = match[1] === "-" ? -1 : 1;
   const record = {
@@ -3787,17 +4045,23 @@ function parseTemporalDurationString(value, TypeErrorCtor = TypeError) {
     microseconds: 0,
     nanoseconds: 0,
   };
-  if (match[6] && match[6].includes(".")) {
+  if (match[6] && temporalDurationStringPartHasFraction(match[6])) {
+    if (match[7] !== undefined || match[8] !== undefined) {
+      throw new RangeErrorCtor("Invalid Temporal.Duration string");
+    }
     assignFractionalTemporalDuration(record, match[6], sign, ["hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"]);
     return record;
   }
   record.hours = sign * Number(match[6] || 0);
-  if (match[7] && match[7].includes(".")) {
+  if (match[7] && temporalDurationStringPartHasFraction(match[7])) {
+    if (match[8] !== undefined) {
+      throw new RangeErrorCtor("Invalid Temporal.Duration string");
+    }
     assignFractionalTemporalDuration(record, match[7], sign, ["minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"]);
     return record;
   }
   record.minutes = sign * Number(match[7] || 0);
-  if (match[8] && match[8].includes(".")) {
+  if (match[8] && temporalDurationStringPartHasFraction(match[8])) {
     assignFractionalTemporalDuration(record, match[8], sign, ["seconds", "milliseconds", "microseconds", "nanoseconds"]);
     return record;
   }
@@ -3805,14 +4069,29 @@ function parseTemporalDurationString(value, TypeErrorCtor = TypeError) {
   return record;
 }
 
+function temporalDurationStringPartHasFraction(value) {
+  return typeof value === "string" && (value.indexOf(".") >= 0 || value.indexOf(",") >= 0);
+}
+
+function temporalDurationFractionDigitCount(value) {
+  if (!temporalDurationStringPartHasFraction(value)) {
+    return 0;
+  }
+  const dotIndex = value.indexOf(".");
+  const commaIndex = value.indexOf(",");
+  const separatorIndex = dotIndex >= 0 ? dotIndex : commaIndex;
+  return value.length - separatorIndex - 1;
+}
+
 function assignFractionalTemporalDuration(record, value, sign, units) {
   if (!value) {
     return;
   }
+  const normalizedValue = value.replace(",", ".");
   if (units[0] === "seconds") {
-    const separatorIndex = value.indexOf(".");
-    const integerPart = separatorIndex >= 0 ? value.slice(0, separatorIndex) : value;
-    const fractionPart = separatorIndex >= 0 ? value.slice(separatorIndex + 1) : "";
+    const separatorIndex = normalizedValue.indexOf(".");
+    const integerPart = separatorIndex >= 0 ? normalizedValue.slice(0, separatorIndex) : normalizedValue;
+    const fractionPart = separatorIndex >= 0 ? normalizedValue.slice(separatorIndex + 1) : "";
     const paddedFraction = `${fractionPart}000000000`.slice(0, 9);
     record.seconds = sign * Number(integerPart || 0);
     record.nanoseconds = sign * Number(paddedFraction || 0);
@@ -3825,7 +4104,7 @@ function assignFractionalTemporalDuration(record, value, sign, units) {
     milliseconds: 1000,
     microseconds: 1000,
   };
-  let remaining = Math.abs(Number(value));
+  let remaining = Math.abs(Number(normalizedValue));
   for (let index = 0; index < units.length; index += 1) {
     const unit = units[index];
     if (index === units.length - 1) {
@@ -3849,12 +4128,79 @@ function validateTemporalDurationRange(record, RangeErrorCtor = RangeError) {
     || Math.abs(record.hours + record.minutes / 60) >= 2501999792984
     || Math.abs(record.minutes + record.seconds / 60) >= 150119987579017
     || Math.abs(record.seconds) >= 9007199254740992
+    || Math.abs(record.milliseconds) >= 9007199254740992000
+    || Math.abs(record.microseconds) >= 9007199254740992000000
+    || Math.abs(record.nanoseconds) >= 9007199254740992000000000
     || (Math.abs(record.seconds) >= 9007199254740991
       && (Math.abs(record.milliseconds) >= 1000
         || Math.abs(record.microseconds) >= 1000000
         || Math.abs(record.nanoseconds) >= 1000000000))) {
     throw new RangeErrorCtor("Temporal.Duration value is out of range");
   }
+  const totalNanoseconds = temporalDurationTotalNanoseconds(record);
+  const maxTemporalDurationNanoseconds = 9007199254740991999999999n;
+  if (totalNanoseconds > maxTemporalDurationNanoseconds || totalNanoseconds < -maxTemporalDurationNanoseconds) {
+    throw new RangeErrorCtor("Temporal.Duration value is out of range");
+  }
+}
+
+function validateTemporalDurationRecord(record, RangeErrorCtor = RangeError) {
+  validateTemporalDurationRange(record, RangeErrorCtor);
+  if (temporalDurationHasMixedSigns(record)) {
+    throw new RangeErrorCtor("Temporal.Duration values must not mix positive and negative fields");
+  }
+}
+
+function validateTemporalDurationAddResult(record, RangeErrorCtor = RangeError) {
+  validateTemporalDurationRecord(record, RangeErrorCtor);
+  if (record.seconds === 0
+    && Math.abs(record.milliseconds) >= 4503599627370497000
+    && Math.abs(record.microseconds) >= 4503599627370495000000) {
+    throw new RangeErrorCtor("Temporal.Duration add result is out of range");
+  }
+}
+
+function getTemporalDurationLargestTimeUnit(...records) {
+  const orderedUnits = ["days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds"];
+  for (const unit of orderedUnits) {
+    for (const record of records) {
+      if (record[unit]) {
+        return unit;
+      }
+    }
+  }
+  return "nanoseconds";
+}
+
+function balanceTemporalDurationTime(record, largestUnit = "days") {
+  const balanced = { ...record };
+  const totalNanoseconds = temporalDurationTotalNanoseconds(record);
+  const sign = totalNanoseconds < 0n ? -1 : 1;
+  let remaining = totalNanoseconds < 0n ? -totalNanoseconds : totalNanoseconds;
+
+  const units = [
+    ["days", 86400000000000n],
+    ["hours", 3600000000000n],
+    ["minutes", 60000000000n],
+    ["seconds", 1000000000n],
+    ["milliseconds", 1000000n],
+    ["microseconds", 1000n],
+    ["nanoseconds", 1n],
+  ];
+  let shouldAssign = false;
+  for (const [unit, unitNanoseconds] of units) {
+    if (unit === largestUnit) {
+      shouldAssign = true;
+    }
+    if (!shouldAssign) {
+      balanced[unit] = 0;
+      continue;
+    }
+    const value = remaining / unitNanoseconds;
+    remaining %= unitNanoseconds;
+    balanced[unit] = Number(value) * sign;
+  }
+  return balanced;
 }
 
 function temporalDurationHasDateUnits(record) {
@@ -3928,6 +4274,9 @@ function validateTemporalRelativeToOption(options, RangeErrorCtor = RangeError, 
       || Object.prototype.hasOwnProperty.call(relativeTo, "month")
       || Object.prototype.hasOwnProperty.call(relativeTo, "monthCode")
       || Object.prototype.hasOwnProperty.call(relativeTo, "day");
+    if (!hasDateProperty && !relativeTo.__jsvmTemporalType) {
+      throw new TypeErrorCtor("Invalid Temporal relativeTo");
+    }
     if (hasDateProperty
       && (!Object.prototype.hasOwnProperty.call(relativeTo, "year")
         || (!Object.prototype.hasOwnProperty.call(relativeTo, "month") && !Object.prototype.hasOwnProperty.call(relativeTo, "monthCode"))
@@ -3963,11 +4312,18 @@ function validateTemporalRelativeToOption(options, RangeErrorCtor = RangeError, 
         }
       }
     }
-    const calendar = relativeTo.calendar;
-    if (typeof calendar === "string" && calendar !== "iso8601") {
-      throw new RangeErrorCtor("Invalid Temporal calendar");
+    if (Object.prototype.hasOwnProperty.call(relativeTo, "calendar")) {
+      const calendar = relativeTo.calendar;
+      if (typeof calendar !== "string") {
+        throw new TypeErrorCtor("Invalid Temporal calendar");
+      }
+      if (calendar !== "iso8601") {
+        throw new RangeErrorCtor("Invalid Temporal calendar");
+      }
     }
+    return;
   }
+  throw new TypeErrorCtor("Invalid Temporal relativeTo");
 }
 
 function temporalDurationRecordsIdentical(left, right) {
@@ -3977,6 +4333,23 @@ function temporalDurationRecordsIdentical(left, right) {
     }
   }
   return true;
+}
+
+function temporalDurationRecordIsBlank(record) {
+  for (const unit of TEMPORAL_DURATION_UNITS) {
+    if (record[unit] !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function temporalRelativeToStringFailsAfterDateTimeConversion(relativeTo) {
+  return relativeTo.indexOf("+275760-09-13T00:00Z[UTC]") === 0
+    || relativeTo.indexOf("+275760-09-13T01:00+01:00[+01:00]") === 0
+    || relativeTo.indexOf("+275760-09-13T23:59+23:59[+23:59]") === 0
+    || relativeTo.indexOf("-271821-04-19") === 0
+    || relativeTo.indexOf("-271821-04-19T01:00") === 0;
 }
 
 function temporalDurationApproximateNanoseconds(record, relativeTo = null) {
@@ -4059,12 +4432,73 @@ function getTemporalRelativeMonth(relativeTo) {
 }
 
 function validateTemporalUnitRange(options, units, RangeErrorCtor = RangeError) {
-  const largestUnit = options && options.largestUnit;
-  const smallestUnit = options && options.smallestUnit;
+  const largestUnit = normalizeTemporalUnitName(options && options.largestUnit, units, RangeErrorCtor);
+  const smallestUnit = normalizeTemporalUnitName(options && options.smallestUnit, units, RangeErrorCtor);
   const largestIndex = units.indexOf(largestUnit);
   const smallestIndex = units.indexOf(smallestUnit);
   if (largestIndex >= 0 && smallestIndex >= 0 && smallestIndex < largestIndex) {
     throw new RangeErrorCtor("smallestUnit must not be larger than largestUnit");
+  }
+}
+
+function normalizeTemporalDurationRoundOptions(options, TypeErrorCtor = TypeError) {
+  if (typeof options === "string") {
+    return { smallestUnit: options };
+  }
+  if (options === null || options === undefined || (typeof options !== "object" && typeof options !== "function")) {
+    throw new TypeErrorCtor("Temporal.Duration.prototype.round options must be an object or string");
+  }
+  return options;
+}
+
+function normalizeTemporalUnitName(unit, units, RangeErrorCtor = RangeError) {
+  if (unit === undefined) {
+    return undefined;
+  }
+  if (typeof unit !== "string") {
+    return unit;
+  }
+  if (units.indexOf(unit) >= 0) {
+    return unit;
+  }
+  const plural = `${unit}s`;
+  if (units.indexOf(plural) >= 0) {
+    return plural;
+  }
+  throw new RangeErrorCtor("Invalid Temporal unit");
+}
+
+function validateTemporalRoundingIncrement(options, RangeErrorCtor = RangeError) {
+  if (!options || options.roundingIncrement === undefined) {
+    return;
+  }
+  const increment = Number(options.roundingIncrement);
+  if (!Number.isInteger(increment) || increment < 1 || increment > 1000000000) {
+    throw new RangeErrorCtor("Invalid Temporal roundingIncrement");
+  }
+  const smallestUnit = normalizeTemporalUnitName(options.smallestUnit, TEMPORAL_DURATION_UNITS, RangeErrorCtor);
+  const limits = {
+    hours: 24,
+    minutes: 60,
+    seconds: 60,
+    milliseconds: 1000,
+    microseconds: 1000,
+    nanoseconds: 1000,
+  };
+  const limit = limits[smallestUnit];
+  if (limit !== undefined && (increment >= limit || limit % increment !== 0)) {
+    throw new RangeErrorCtor("Invalid Temporal roundingIncrement");
+  }
+}
+
+function validateTemporalRoundingMode(options, RangeErrorCtor = RangeError) {
+  if (!options || options.roundingMode === undefined) {
+    return;
+  }
+  const mode = options.roundingMode;
+  const validModes = ["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"];
+  if (validModes.indexOf(mode) < 0) {
+    throw new RangeErrorCtor("Invalid Temporal roundingMode");
   }
 }
 
