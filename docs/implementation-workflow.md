@@ -1,121 +1,224 @@
-# VM and Compiler Implementation Workflow
+# Workflow d'implementation VM / compilateur pour agent IA
 
-This project is implemented incrementally against local fixtures and Test262.
-Each pass should keep the bytecode contract explicit and leave a reproducible
-test trail.
+Ce document decrit la methode de travail attendue pour un agent IA qui
+continue l'implementation du compilateur JavaScript et de la VM bytecode de ce
+projet.
 
-## 1. Start From The First Real Failure
+Le but n'est pas seulement de faire passer des tests. L'agent doit corriger le
+premier vrai bug observable, conserver l'architecture du projet, limiter les
+regressions, et laisser une trace de validation reproductible.
 
-Run the broad suite in fail-fast mode:
+## 1. Regles de pilotage
+
+L'agent doit suivre ces regles pendant toute la session:
+
+- continuer a corriger les bugs un par un tant qu'il reste un prochain echec
+clair et qu'aucune aide humaine n'est necessaire
+- utiliser le mode fast-fail pour trouver le premier vrai echec
+- utiliser des tests cibles pour debugger un correctif
+- relancer regulierement un test global fast-fail pour verifier l'absence de
+regression et reveler le prochain bug
+- ne pas s'arreter a une analyse si un correctif concret peut etre implemente
+- ne pas lancer `npm run build` en parallele avec le runner VM/test262
+- utiliser un timeout long, au minimum une heure, pour les runs globaux
+- si un bug unitaire est corrige, confirmer avec:
+  1. `npm run build`
+  2. le ou les tests cibles
+  3. un rerun global fast-fail
+
+## 2. Architecture a respecter
+
+L'agent ne doit pas contourner l'architecture du repo.
+
+### Compilateur
+
+- le vrai compilateur vit sous `compiler/`
+- le point d'entree est `compiler/index.ts`
+- quand c'est praticable, un type d'operation AST = un fichier dedie
+- la logique partagee doit etre extraite dans un helper ou un module commun
+- ne pas ajouter de wrapper racine si l'integration externe ne l'exige pas
+
+### VM
+
+- la vraie VM vit sous `vm/`
+- le point d'entree est `vm/index.ts`
+- les registres et les environnements lexicaux sont deux espaces distincts
+- ne pas reintroduire l'ancienne abstraction `frame`
+- les imports locaux doivent converger vers un pipeline compile puis execute par
+la VM, pas un bypass permanent via l'hote
+
+### Bytecode
+
+- si un nouvel opcode est necessaire:
+  1. l'ajouter dans `bytecode/opcodes.ts`
+  2. documenter sa forme dans `docs/bytecode.md`
+  3. implementer son execution cote VM avant de l'emettre largement cote
+    compilateur
+
+## 3. Strategie de correction
+
+L'agent doit toujours partir du premier echec reel.
+
+Ordre attendu:
+
+1. lancer un run global fast-fail
+2. prendre le premier test qui echoue vraiment
+3. classifier la cause
+4. corriger a la bonne couche
+5. valider localement
+6. relancer un global fast-fail
+7. passer au prochain echec
+
+L'agent ne doit pas ouvrir plusieurs chantiers semantiques a la fois, sauf si
+plusieurs tests echouent a cause de la meme cause racine immediate.
+
+## 4. Classification des echecs
+
+Avant toute modification, l'agent doit identifier la categorie de bug:
+
+- parseur: syntaxe mal acceptee ou mal rejetee
+- lowering compilateur: AST supporte partiellement ou sequence bytecode
+insuffisante
+- contrat bytecode: il manque une instruction explicite
+- execution VM: opcode existant mais semantique JavaScript incorrecte
+- runtime: builtin, descripteur, coercion, espece, iterateur, proxy, module,
+etc.
+- harness: metadata Test262, strict mode, async completion, include, realm
+
+La correction doit etre faite a la couche qui porte legitimement la semantique.
+Il faut eviter les contournements locaux qui masquent un manque structurel.
+
+## 5. Commandes de travail
+
+### Build
 
 ```sh
-node dist/scripts/run-test-suite.js --test262 --test262-vm --fail-fast
+npm run build
 ```
 
-Use the first compiler failure and the first VM failure from
-`reports/test-report.json` as the next work items. Avoid batch-fixing unrelated
-areas unless they share the same root cause.
-
-For focused debugging, use `--filter=` and, when needed, `--skip=`:
+### Tests locaux
 
 ```sh
-node dist/scripts/run-test-suite.js --no-local --no-test262-vm --filter="path\\to\\test.js" --fail-fast
+npm run test:local
+```
+
+### Test cible VM
+
+```sh
 node dist/scripts/run-test-suite.js --no-local --no-test262 --test262-vm --filter="path\\to\\test.js" --fail-fast
 ```
 
-## 2. Classify The Gap
-
-Before editing, identify whether the failure is:
-
-- parser support: Acorn/Babel accepts or rejects the source incorrectly for the
-  runner's current mode
-- compiler lowering: an AST node or operator has no handler, or emits an
-  insufficient instruction sequence
-- bytecode contract: a new semantic operation needs a dedicated instruction
-- VM execution: an existing opcode has incorrect JavaScript semantics
-- runtime normalization: a host builtin needs realm, descriptor, species,
-  iterator, or legacy behavior normalization
-- harness behavior: Test262 metadata, strict mode, includes, async completion,
-  or realm setup is not represented correctly
-
-Prefer fixing the lowest layer that owns the semantics. For example, object
-spread belongs in bytecode/VM support, not in an ad hoc compiler-only
-`Object.assign` lowering.
-
-## 3. Add Bytecode Deliberately
-
-When adding an opcode:
-
-1. Add the opcode to `bytecode/opcodes.ts`.
-2. Document its operand shape in `docs/bytecode.md`.
-3. Emit it from the compiler only after the VM handler exists.
-4. Keep operand order consistent with nearby instructions.
-
-New opcodes should model JavaScript semantics that are hard to express safely
-with existing instructions. Do not hide observable behavior in register tricks.
-
-## 4. Keep Compiler Handlers Modular
-
-Compiler support should live under `compiler/`:
-
-- expressions in `compiler/expressions/`
-- statements in `compiler/statements/`
-- shared lowering helpers in existing shared modules or a new focused helper
-
-If two handlers need the same lowering pattern, extract a helper instead of
-duplicating instruction sequences.
-
-## 5. Preserve Runtime Storage Boundaries
-
-Registers are temporary values. Lexical environments are binding storage.
-
-Do not reintroduce a frame abstraction that mixes registers, lexical bindings,
-`this`, and control state. If a new semantic needs runtime context, add an
-explicit state field or opcode operand and document it.
-
-## 6. Validate In Three Steps
-
-After a fix:
-
-1. Rebuild:
-
-   ```sh
-   npm run build
-   ```
-
-2. Run the targeted compiler or VM Test262 case with `--fail-fast`.
-3. Run local coverage:
-
-   ```sh
-   npm run test:local
-   ```
-
-Then run the broad fail-fast suite again and record the next first failure:
+### Tranche globale VM fast-fail
 
 ```sh
-node dist/scripts/run-test-suite.js --test262 --test262-vm --fail-fast
+node dist/scripts/run-test-suite.js --no-local --no-test262 --test262-vm --skip=17090 --limit=1000 --fail-fast
 ```
 
-Do not run build and the VM runner in parallel. `npm run build` deletes `dist/`,
-which can break worker-based VM runs.
+### Utilisation de `--skip=`
 
-## 7. Runtime Builtins Policy
+`--skip=` sert uniquement a:
 
-Runtime builtin fixes should preserve observable descriptors, realm behavior,
-species behavior, and strict/sloppy `this` binding. Prefer small normalization
-functions near related runtime helpers.
+- revenir rapidement au voisinage d'un bug connu
+- eviter de rescanner des centaines de tests deja validés dans la tranche
+courante
+- debugger un test precis apres avoir confirme qu'un correctif unitaire passe
 
-When native methods are not realm-correct for the VM environment, implement a
-manual path that uses shared helpers such as species construction and own data
-property definition. Keep native delegation for cases where the host behavior is
-known to match and the VM does not need interposition.
+L'agent ne doit pas utiliser `--skip=` pour eviter durablement un bug. Le but
+reste de faire progresser le run global.
 
-## 8. Report The Result
+## 6. Ordre de validation obligatoire
 
-For each implementation pass, report:
+Pour chaque correctif:
 
-- files changed at a high level
-- targeted tests that passed
-- local test result
-- broad fail-fast result
-- the next compiler and VM failures, if any
+1. modifier le code
+2. lancer `npm run build`
+3. lancer le test cible lie au bug
+4. si le test cible passe, lancer `npm run test:local`
+5. si les tests locaux passent, relancer un run global fast-fail
+
+Le run global est obligatoire apres un correctif unitaire reussi. Un correctif
+qui passe en cible mais pas en global n'est pas considere stable.
+
+## 7. Politique de progression
+
+L'agent doit travailler en boucle:
+
+1. premier echec global
+2. correctif minimal mais structurellement propre
+3. validation cible
+4. validation locale
+5. validation globale
+6. repetition
+
+L'agent doit continuer tant que:
+
+- le prochain echec est comprehensible
+- le repo reste modifiable sans aide utilisateur
+- les tests locaux ne regressent pas
+
+L'agent peut s'arreter seulement si:
+
+- il n'y a plus d'echec exploitable sans nouvelle decision produit
+- un changement d'architecture important demande confirmation humaine
+- un blocage externe empeche de continuer proprement
+
+## 8. Contraintes de qualite
+
+L'agent doit respecter ces principes:
+
+- pas de duplication inutile entre plusieurs fichiers
+- extraire la logique partagee si deux correctifs ressemblent trop
+- pas de "quick fix" local si la bonne solution est un helper reutilisable
+- garder les comportements explicites et testables
+- ne pas cacher de semantique dans des astuces de registres
+- si un comportement reste incomplet, le code doit le rendre clair
+
+## 9. Builtins et runtime
+
+Quand le bug touche un builtin ou un comportement runtime observable,
+l'agent doit verifier:
+
+- branding
+- descripteurs de propriete
+- ordre des coercions
+- type d'erreur attendu
+- cas `Symbol`, `BigInt`, `null`, `undefined`
+- comportement realm-correct si la VM interpose
+- semantique proxy / iterateur / species / relativeTo / calendar / timeZone si
+la zone concernee le demande
+
+Quand une implementation host en texte ou delegation dynamique devient trop  
+fragile, l'agent doit preferer un chemin runtime explicite et partage.
+
+## 10. Ce qui doit etre rapporte a la fin d'un tour
+
+Si l'agent termine un tour de travail, il doit fournir un bilan concis mais
+complet contenant:
+
+- les fichiers modifies
+- la zone semantique corrigee
+- les tests cibles passes
+- le resultat de `npm run test:local`
+- le dernier resultat global fast-fail
+- le prochain premier echec reel
+
+Si l'agent estime pouvoir continuer sans aide, il doit continuer au lieu de
+clore la conversation.
+
+## 11. Resume operatoire minimal
+
+La version courte a suivre est:
+
+1. trouver le premier vrai echec avec fast-fail
+2. corriger ce bug a la bonne couche
+3. build
+4. test cible
+5. tests locaux
+6. fast-fail global
+7. repeter sans s'arreter
+
+Tant qu'il reste des chose a implémenter/corriger, l'agent doit continuer.  
+  
+## 12. Documentation
+
+Gardez la Documentation a jour dans docs/*
